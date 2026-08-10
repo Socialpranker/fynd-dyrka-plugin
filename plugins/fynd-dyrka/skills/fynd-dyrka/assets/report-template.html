@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Security Scan — {{TARGET}}</title>
+<style>
+  :root {
+    --bg: #0d1117; --bg2: #161b22; --bg3: #21262d;
+    --text: #e6edf3; --text2: #8b949e; --border: #30363d;
+    --crit: #f85149; --high: #ff8c42; --med: #d29922; --low: #58a6ff; --info: #8b949e;
+    --ok: #3fb950; --accent: #58a6ff;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #ffffff; --bg2: #f6f8fa; --bg3: #eaeef2;
+      --text: #1f2328; --text2: #656d76; --border: #d0d7de;
+      --crit: #cf222e; --high: #bc4c00; --med: #9a6700; --low: #0969da; --info: #656d76;
+      --ok: #1a7f37; --accent: #0969da;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2rem 1rem; background: var(--bg); color: var(--text);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  header { border-bottom: 1px solid var(--border); padding-bottom: 1rem; margin-bottom: 1.5rem; }
+  h1 { font-size: 1.6rem; margin: 0 0 .3rem; }
+  h2 { font-size: 1.2rem; margin: 2rem 0 .8rem; padding-bottom: .3rem; border-bottom: 1px solid var(--border); }
+  .meta { color: var(--text2); font-size: .9rem; }
+  .grade {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 3rem; height: 3rem; border-radius: 50%; font-weight: 800; font-size: 1.5rem;
+    color: #fff; margin-left: .5rem; vertical-align: middle;
+  }
+  .summary { display: flex; gap: .6rem; flex-wrap: wrap; margin: 1rem 0; }
+  .chip {
+    background: var(--bg2); border: 1px solid var(--border); border-radius: 6px;
+    padding: .5rem .9rem; font-size: .9rem;
+  }
+  .chip b { font-size: 1.1rem; }
+  .card {
+    background: var(--bg2); border: 1px solid var(--border); border-left-width: 4px;
+    border-radius: 6px; padding: 1rem 1.2rem; margin: .8rem 0;
+  }
+  .card.critical { border-left-color: var(--crit); }
+  .card.high { border-left-color: var(--high); }
+  .card.medium { border-left-color: var(--med); }
+  .card.low { border-left-color: var(--low); }
+  .card h3 { margin: 0 0 .4rem; font-size: 1.05rem; }
+  .badge {
+    display: inline-block; padding: .15rem .5rem; border-radius: 4px; font-size: .72rem;
+    font-weight: 700; color: #fff; margin-right: .5rem; text-transform: uppercase;
+  }
+  .badge.critical { background: var(--crit); }
+  .badge.high { background: var(--high); }
+  .badge.medium { background: var(--med); }
+  .badge.low { background: var(--low); }
+  .loc { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .82rem; color: var(--text2); }
+  .fix { color: var(--ok); }
+  .src { color: var(--text2); font-size: .8rem; }
+  .chain { background: var(--bg3); border-radius: 6px; padding: 1rem 1.2rem; margin: .8rem 0; }
+  .chain ol { margin: .4rem 0; padding-left: 1.4rem; }
+  .muted { color: var(--text2); }
+  code { background: var(--bg3); padding: .1rem .35rem; border-radius: 3px; font-size: .85em; }
+  details { margin: .8rem 0; }
+  summary { cursor: pointer; color: var(--text2); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Security Scan — {{TARGET}} <span class="grade" style="background:{{GRADE_COLOR}}">{{GRADE}}</span></h1>
+    <div class="meta">{{DATE}} · Слои: {{LAYERS}}</div>
+  </header>
+
+  <div class="summary">
+    <div class="chip" style="color:var(--crit)"><b>{{CRITICAL_COUNT}}</b> Critical</div>
+    <div class="chip" style="color:var(--high)"><b>{{HIGH_COUNT}}</b> High</div>
+    <div class="chip" style="color:var(--med)"><b>{{MEDIUM_COUNT}}</b> Medium</div>
+    <div class="chip" style="color:var(--low)"><b>{{LOW_COUNT}}</b> Low</div>
+  </div>
+
+  <p>{{EXECUTIVE_SUMMARY}}</p>
+
+  <h2>Критичное — чинить сейчас</h2>
+  {{CRITICAL_FINDINGS}}
+
+  <h2>Цепочки атак</h2>
+  {{ATTACK_CHAINS}}
+
+  <h2>Остальное</h2>
+  {{OTHER_FINDINGS}}
+
+  <details>
+    <summary>Отсеяно как ложное / низкое ({{FILTERED_COUNT}})</summary>
+    {{FILTERED_FINDINGS}}
+  </details>
+
+  <details>
+    <summary>Что не проверено</summary>
+    {{NOT_CHECKED}}
+  </details>
+</div>
+</body>
+</html>
