@@ -1,86 +1,87 @@
-# Attack playbooks — чек-лист сценариев
+# Attack playbooks — a scenario checklist
 
-Расширяет Шаг 3 (ручной разбор). Открытый вопрос «нет ли логических дыр?» слаб —
-он не даёт зацепиться. Эти playbooks дают конкретные, воспроизводимые сценарии:
-для каждого — предпосылка, как проверить, MITRE-цепочка. Иди по списку и на
-каждый отвечай «применимо / не применимо / проверил — чисто».
+Extends Step 3 (manual review). The open question "are there any logic flaws?" is
+weak — it gives you nothing to grab. These playbooks give concrete, reproducible
+scenarios: for each, the precondition, how to check, and the MITRE chain. Walk the
+list and answer every item with "applies / does not apply / checked — clean".
 
 ## 8 playbooks (external + web)
 
 1. **Recon → data breach**
-   Утёкший API-ключ в прод-JS или в `.git` → доступ к данным/облаку.
-   Проверка: скачать JS-бандлы и `.git`, грепнуть на ключи; проверить, живой
-   ли ключ (whoami-запрос к провайдеру). Цепочка: T1595 → T1552.001 → T1213.
+   A leaked API key in production JS or in `.git` → access to data or cloud.
+   Check: pull the JS bundles and `.git`, grep for keys; verify the key is live
+   (a whoami call to the provider). Chain: T1595 → T1552.001 → T1213.
 
 2. **Subdomain takeover**
-   Dangling CNAME на невостребованный сервис (S3/GitHub Pages/Heroku).
-   Проверка: перечислить поддомены, найти CNAME на несуществующий bucket/app.
-   Цепочка: T1590 → T1584.001 → T1566.001.
+   A dangling CNAME to an unclaimed service (S3/GitHub Pages/Heroku).
+   Check: enumerate subdomains, find a CNAME to a non-existent bucket or app.
+   Chain: T1590 → T1584.001 → T1566.001.
 
 3. **Password-reset exploitation**
-   Host-header injection в письме сброса, предсказуемый токен, отсутствие
-   инвалидации старого. Проверка: как генерируется reset-токен, привязан ли к
-   сессии, истекает ли, можно ли подменить домен в ссылке. Цепочка: T1190 →
-   T1078.
+   Host-header injection in the reset email, a predictable token, no
+   invalidation of the previous one. Check: how the reset token is generated,
+   whether it is bound to the session, whether it expires, whether the domain in
+   the link can be substituted. Chain: T1190 → T1078.
 
 4. **API key in client-side JS**
-   Секрет (Stripe/Firebase/Maps с широкими правами, приватный ключ) в бандле
-   фронта. Проверка: скан JS на паттерны ключей; оценить scope ключа (публичный
-   publishable vs secret). Цепочка: T1592 → T1552.001.
+   A secret (Stripe/Firebase/Maps with broad scope, a private key) in the
+   frontend bundle. Check: scan JS for key patterns; assess the key's scope
+   (publishable vs secret). Chain: T1592 → T1552.001.
 
 5. **CORS → session theft**
-   `Access-Control-Allow-Origin` отражает произвольный Origin +
-   `Allow-Credentials: true`. Проверка: запрос с `Origin: https://evil.com`,
-   смотреть, отражается ли в ответе с credentials. Цепочка: T1190 → T1539.
+   `Access-Control-Allow-Origin` reflects an arbitrary Origin together with
+   `Allow-Credentials: true`. Check: send `Origin: https://evil.com` and see
+   whether it is reflected alongside credentials. Chain: T1190 → T1539.
 
 6. **Email spoofing / BEC**
-   Нет SPF `-all` / DMARC `p=reject` → письма «от компании» проходят.
-   Проверка: `dig TXT` на SPF и `_dmarc`; матрица в `email-spoofability` ниже.
-   Цепочка: T1590 → T1566.001.
+   No SPF `-all` / DMARC `p=reject` → mail "from the company" is delivered.
+   Check: `dig TXT` for SPF and `_dmarc`; see the matrix below. Chain: T1590 →
+   T1566.001.
 
-7. **Admin panel + default creds**
-   Открытая `/admin` без rate-limit + дефолтные/слабые учётки.
-   Проверка: найти админ-роуты, проверить наличие auth и rate-limit, típичные
-   дефолты. Цепочка: T1133 → T1078 → T1190.
+7. **Admin panel + default credentials**
+   An exposed `/admin` with no rate limit plus default or weak accounts.
+   Check: locate admin routes, verify auth and rate limiting, try typical
+   defaults. Chain: T1133 → T1078 → T1190.
 
-8. **Cloud storage misconfig**
-   Публичный S3/GCS-bucket, listable, с чувствительными объектами.
-   Проверка: найти ссылки на bucket в коде/JS, проверить листинг и ACL.
-   Цепочка: T1580 → T1530.
+8. **Cloud storage misconfiguration**
+   A public, listable S3/GCS bucket holding sensitive objects.
+   Check: find bucket references in code and JS, test listing and ACLs.
+   Chain: T1580 → T1530.
 
-## Business-logic / access-control чек-лист
+## Business-logic / access-control checklist
 
-Конкретизирует «логические дыры» из Шага 3. Спрашивай раздельно:
+Makes the "logic flaws" of Step 3 concrete. Ask each separately:
 
-- **Payment / process bypass** — можно ли получить товар/кредиты/апгрейд, минуя
-  оплату (переход состояния по запросу клиента, а не по факту платежа на
-  сервере)?
-- **IDOR (BOLA)** — подмена чужого `id` в запросе; фильтрует ли БД по `userId`
-  текущего пользователя?
-- **Privilege escalation** — можно ли поднять роль: mass-assignment
-  (`{"role":"admin"}`), отдельный «служебный» эндпоинт без проверки роли?
-- **JWT `alg:none`** — принимает ли сервер токен с `"alg":"none"` или со сменой
-  RS256→HS256 (подпись публичным ключом)?
-- **Session fixation** — меняется ли session ID после логина?
-- **Mass enumeration** — последовательные ID (`/user/1`, `/user/2`) без
-  rate-limit → выкачивание базы пользователей?
-- **GraphQL introspection** — открыт ли `__schema` в проде, раскрывая всю
-  модель данных и скрытые мутации?
-- **Race conditions** — параллельные запросы на списание баланса/применение
-  промокода/инвайта уводят состояние за допустимое (см. приём «сравни соседей»
-  в SKILL.md)?
+- **Payment / process bypass** — can goods, credits or an upgrade be obtained
+  without paying (a state transition taken from the client's request rather than
+  from a server-side payment fact)?
+- **IDOR (BOLA)** — substituting someone else's `id`; does the query filter by
+  the current user's `userId`?
+- **Privilege escalation** — can a role be raised: mass assignment
+  (`{"role":"admin"}`), a separate "internal" endpoint with no role check?
+- **JWT `alg:none`** — does the server accept a token with `"alg":"none"`, or an
+  RS256→HS256 switch (signing with the public key)?
+- **Session fixation** — does the session ID change after login?
+- **Mass enumeration** — sequential IDs (`/user/1`, `/user/2`) with no rate limit
+  → the whole user base can be pulled?
+- **GraphQL introspection** — is `__schema` open in production, exposing the data
+  model and hidden mutations?
+- **Race conditions** — do concurrent balance debits, promo-code redemptions or
+  invite uses drive state past what is allowed (see "compare similar places" in
+  SKILL.md)?
 
-## email-spoofability (матрица SPF × DMARC)
+## Email spoofability (SPF × DMARC matrix)
 
-Дешёвая пассивная проверка — только `dig TXT`. Оценка риска подделки:
+A cheap passive check — `dig TXT` only. Spoofing risk:
 
 | SPF | DMARC | Risk |
 |---|---|---|
-| нет | нет | **CRITICAL** — почта подделывается свободно |
-| `~all` (soft) или `?all` | `p=none` | **HIGH** |
-| `-all` (hard) | `p=none` или `pct<100` | **MEDIUM** |
+| none | none | **CRITICAL** — mail is spoofable freely |
+| `~all` (soft) or `?all` | `p=none` | **HIGH** |
+| `-all` (hard) | `p=none` or `pct<100` | **MEDIUM** |
 | `-all` | `p=quarantine` | **LOW-MEDIUM** |
-| `-all` | `p=reject`, `pct=100` | **LOW** — правильная конфигурация |
+| `-all` | `p=reject`, `pct=100` | **LOW** — correct configuration |
 
-`pct=` < 100 в DMARC = enforcement частичный: понижай уверенность в «защищено».
-DKIM проверяется отдельно (наличие селектора), но SPF+DMARC — основной сигнал.
+`pct=` below 100 in DMARC means partial enforcement: lower your confidence in
+"protected". DKIM is checked separately (presence of a selector), but SPF plus
+DMARC is the primary signal.

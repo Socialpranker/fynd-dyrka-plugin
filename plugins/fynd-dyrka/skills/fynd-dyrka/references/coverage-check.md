@@ -1,67 +1,69 @@
-# Самопроверка охвата — Шаг 7
+# Coverage self-check — Step 7
 
-> Читается на Шаге 7, перед отчётом. Таблица охвата и шесть контрольных
-> вопросов, на которые отвечают действием, а не словом.
+> Read this on Step 7, before the report. A coverage table and six control
+> questions answered with an action, not a word.
 
-Открой `/tmp/secscan/surface.md` и **выпиши таблицу** — не «мысленно сверься».
-Риторический вопрос самому себе всегда получает ответ «да»; таблица его не
-получает, пока в ней есть пустая клетка.
+Open `/tmp/secscan/surface.md` and **write the table out** — do not "check
+mentally". A rhetorical question to yourself always gets a yes; a table does not,
+as long as a cell is still empty.
 
-| Пункт инвентаря (Шаг 2) | Что открыл (файл:строки) | Итог |
+| Inventory item (Step 2) | What you opened (file:lines) | Outcome |
 |---|---|---|
-| `POST /api/scan` | `src/app/api/scan/route.ts:40-90` | auth есть, гонка в кредитах → находка #3 |
-| `worker/phases/*` | — | **пропущено:** не хватило контекста |
+| `POST /api/scan` | `src/app/api/scan/route.ts:40-90` | auth present, race in credits → finding #3 |
+| `worker/phases/*` | — | **skipped:** ran out of context |
 
-Итог по строке — одно из трёх: находка (номер), чисто (что проверял), пропущено
-(почему). Третье легитимно; недопустима только пустая клетка. Таблица идёт в
-отчёт как раздел «Охват».
+The outcome is one of three: a finding (with its number), clean (with what you
+checked), or skipped (with why). The third is legitimate; only an empty cell is
+not. The table goes into the report as the "Coverage" section.
 
-Дальше два контрольных вопроса — на них отвечаешь действием, не словом:
+Then the control questions — answer each with an action, not a word:
 
-1. **Логических находок ноль, а сканеры что-то дали?** Типовой признак того,
-   что Шаг 3 выполнен формально. Вернись и целенаправленно пройди два пути:
-   auth (от эндпоинта до проверки прав) и денежный (от запроса до записи
-   баланса). Ноль находок — валидный результат, но только если в таблице по
-   этим строкам стоит «чисто» с указанием, что проверял.
-2. **Каждая CRITICAL/HIGH прошла обе половины проверки?** Это один проход по
-   отчёту, а не два: у находки должны быть **и** доказательство, **и**
-   пережитое опровержение — они закрывают разные вопросы.
+1. **Zero logic findings while the scanners returned something?** A standard sign
+   that Step 3 was done formally. Go back and walk two paths deliberately: auth
+   (from endpoint to permission check) and money (from request to balance write).
+   Zero findings is a valid result, but only if those rows say "clean" with what
+   was checked.
+2. **Has every CRITICAL/HIGH been through both halves of verification?** This is
+   one pass over the report, not two: a finding needs **both** proof **and** a
+   survived refutation — they answer different questions.
 
-   | Половина | Что ищешь в находке | Нет — что делать |
+   | Half | What to look for in the finding | If absent |
    |---|---|---|
-   | Доказательство (Шаг 3, правило доказательства) | блок с выводом прогона PoC | severity → MEDIUM, метка `[UNVERIFIED]` |
-   | Опровержение (Шаг 3, фальсификационный проход) | строка «пробовал X — не сработало» | severity → MEDIUM: находка найдена, но не проверена |
+   | Proof (Step 3, the proof rule) | a block with PoC run output | severity → MEDIUM, tag `[UNVERIFIED]` |
+   | Refutation (Step 3, the falsification pass) | a line "tried X — it did not hold" | severity → MEDIUM: found but unverified |
 
-   Правило одинаково для своих находок и для находок сканеров, попавших в HIGH.
-   Отвечать «да» на обе половины разом, не открывая отчёт, — ровно тот формализм,
-   против которого весь Шаг 7.
-3. **Сравнил ли ты похожие места между собой?** Назови хотя бы одну группу
-   однотипных операций (деньги, смена владельца, admin-действия) и что показало
-   сравнение внутри неё. «Смотрел каждый эндпоинт по отдельности» — значит приём
-   не применён: расхождения между соседями так не видны.
-4. **Три класса, которые не находит ни один сканер, — по каждому есть строка?**
-   Не «посмотрел ли я вообще», а конкретно: **доступность** (rate-limit до
-   аутентификации, потолок `limit`/батча, синхронная тяжёлая работа),
-   **наблюдаемость** (значимые действия в логах, алерт на аномалию, ретенция),
-   **прод-периметр** (публичный адрес БД, лишние переменные, debug/`/metrics`
-   наружу). По каждому — находка, «чисто» с указанием проверенного, либо
-   «пропущено» с причиной (нет доступа к платформе — легитимная причина).
-   Отсутствие всех трёх в отчёте — признак, что аудит закрыл только
-   конфиденциальность и целостность, но не доступность и не расследуемость.
-5. **Все идентификаторы взяты из вывода инструмента или проверены у
-   источника?** Пройди по отчёту: каждый CVE/GHSA, имя пакета, путь `файл:строка`
-   — откуда он? «Помню» не годится: модели выдумывают номера CVE и
-   несуществующие пакеты. Не подтверждается — убирай идентификатор, а не
-   находку целиком.
-6. **Был фан-аут — куда делись `blind_spots` агентов?** Каждый агент волны 1
-   возвращает список того, что должен был прочитать, но не смог. Это уже
-   готовые строки «пропущено» с причиной — перенеси их в таблицу охвата.
-   Незакрытый `blind_spot`, не доехавший до отчёта, превращает фан-аут в
-   ложное ощущение полноты: агентов было много, значит посмотрели всё.
+   The rule is identical for your own findings and for scanner findings that
+   landed in HIGH. Answering "yes" to both halves without opening the report is
+   exactly the formalism Step 7 exists to prevent.
+3. **Did you compare similar places against each other?** Name at least one group
+   of same-shaped operations (money, ownership transfer, admin actions) and what
+   the comparison inside it showed. "I looked at each endpoint individually"
+   means the technique was not applied: divergence between neighbours is
+   invisible that way.
+4. **The three classes no scanner finds — is there a line for each?** Not "did I
+   look at all" but specifically: **availability** (rate limiting before
+   authentication, a ceiling on `limit`/batch, synchronous heavy work),
+   **observability** (significant actions logged, anomaly alerting, retention),
+   and **the production perimeter** (public database address, stray variables,
+   debug or `/metrics` exposed). Each gets a finding, a "clean" with what was
+   checked, or a "skipped" with a reason (no platform access is a legitimate
+   reason). All three missing from the report means the audit covered
+   confidentiality and integrity but neither availability nor investigability.
+5. **Is every identifier copied from tool output or verified at the source?**
+   Walk the report: every CVE/GHSA, package name, and `file:line` — where did it
+   come from? "I remember" does not count: models invent CVE numbers and
+   non-existent packages. If it does not check out, drop the identifier, not the
+   whole finding.
+6. **If there was a fan-out, where did the agents' `blind_spots` go?** Every
+   wave-1 agent returns a list of what it should have read and could not. Those
+   are ready-made "skipped, because" rows — move them into the coverage table. An
+   unclosed `blind_spot` that never reaches the report turns fan-out into a false
+   sense of completeness: there were many agents, so surely everything was seen.
 
-⚠️ **Повторный прогон этого скилла на том же коде — не проверка.** Одинаковый
-вход и одинаковая инструкция дают одинаковый результат, включая одинаковые
-пропуски: второй прогон подтвердит первый и создаст ощущение верификации,
-которой не было. Хочешь проверить свой же аудит — меняй условие, а не повторяй
-его: другая модель, дифф-режим вместо полного, чужой инвентарь на входе, рой
-вместо волн. Совпало при **изменённом** условии — вот это сигнал.
+⚠️ **Re-running this skill over the same code is not verification.** The same
+input and the same instruction produce the same result, including the same
+omissions: the second run confirms the first and manufactures a verification that
+never happened. To check your own audit, change a condition rather than repeat
+it: a different model, diff mode instead of full, someone else's inventory as
+input, a swarm instead of waves. Agreement under a **changed** condition is the
+signal.

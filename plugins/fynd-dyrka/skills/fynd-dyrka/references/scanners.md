@@ -1,100 +1,103 @@
-# Сканеры fynd-dyrka
+# fynd-dyrka scanners
 
-Оркестратор `scripts/scan.py` использует внешние CLI-сканеры. Ни один не
-обязателен — отсутствующий помечается `skipped`. Здесь: что каждый делает,
-как установить, и как добавить новый.
+The orchestrator `scripts/scan.py` drives external CLI scanners. None is
+mandatory — a missing one is marked `skipped`. This file covers what each does,
+how to install it, and how to add another.
 
-## По слоям
+## By layer
 
-### SAST (статика по коду)
+### SAST (static analysis of code)
 
-| Сканер | Что | Установка | Языки |
-|--------|-----|-----------|-------|
-| **semgrep** | Семантический паттерн-матч, `--config auto` подбирает правила по языкам. Основной SAST. | `brew install semgrep` / `pip install semgrep` | 30+ |
-| **bandit** | Python-специфичные проблемы (eval, pickle, слабая крипта, hardcoded). Запускается только если в дереве есть `.py`. | `pip install bandit` | Python |
+| Scanner | What | Install | Languages |
+|---|---|---|---|
+| **semgrep** | Semantic pattern matching; `--config auto` picks rules by language. The primary SAST engine. | `brew install semgrep` / `pip install semgrep` | 30+ |
+| **bandit** | Python-specific issues (eval, pickle, weak crypto, hardcoded secrets). Runs only when the tree contains `.py`. | `pip install bandit` | Python |
 
 ### secrets
 
-| Сканер | Что | Установка |
-|--------|-----|-----------|
-| **gitleaks** | Утёкшие ключи/токены. В git-репо сканирует **всю историю** (`git` mode), иначе рабочее дерево (`dir` mode). Regex + энтропия. | `brew install gitleaks` |
+| Scanner | What | Install |
+|---|---|---|
+| **gitleaks** | Leaked keys and tokens. In a git repository it scans **the whole history** (`git` mode), otherwise the working tree (`dir` mode). Regex plus entropy. | `brew install gitleaks` |
 
-Опционально можно добавить **trufflehog** — он умеет *верифицировать* найденный
-credential живым запросом к API (меньше ложных). Не подключён по умолчанию.
+Optionally add **trufflehog**, which can *verify* a discovered credential with a
+live API call (fewer false positives). Not wired in by default.
 
-### deps (уязвимые зависимости)
+### deps (vulnerable dependencies)
 
-| Сканер | Что | Установка |
-|--------|-----|-----------|
-| **osv-scanner** | Сверяет lock-файлы с OSV DB (Google). Мультиэкосистемный: npm, pip, cargo, go, maven… | `brew install osv-scanner` |
-| **trivy fs** | Второе мнение по зависимостям + умеет секреты/мисконфиги. | `brew install trivy` |
+| Scanner | What | Install |
+|---|---|---|
+| **osv-scanner** | Matches lock files against the OSV database (Google). Multi-ecosystem: npm, pip, cargo, go, maven… | `brew install osv-scanner` |
+| **trivy fs** | A second opinion on dependencies, and it also handles secrets and misconfigurations. | `brew install trivy` |
 
-osv точнее по версиям (меньше ложных), trivy шире по охвату. Оба в слое — дедуп
-по CVE делается на этапе триажа.
+osv is more precise on versions (fewer false positives), trivy is broader. Both
+run in the layer — CVE deduplication happens during triage.
 
-### iac (контейнеры / инфраструктура-как-код)
+### iac (containers / infrastructure as code)
 
-| Сканер | Что | Установка |
-|--------|-----|-----------|
-| **trivy config** | Dockerfile, Kubernetes, Terraform — мисконфиги по встроенным правилам. | `brew install trivy` |
-| **hadolint** | Линтер Dockerfile (best practices, небезопасные инструкции). Запускается на каждый найденный Dockerfile. | `brew install hadolint` |
+| Scanner | What | Install |
+|---|---|---|
+| **trivy config** | Dockerfile, Kubernetes, Terraform misconfigurations against built-in rules. | `brew install trivy` |
+| **hadolint** | Dockerfile linter (best practices, unsafe instructions). Runs on every Dockerfile found. | `brew install hadolint` |
 
-### dast (активная проверка живого сервиса)
+### dast (active probing of a live service)
 
-| Сканер | Что | Установка |
-|--------|-----|-----------|
-| **nuclei** | Template-based: реально шлёт HTTP-запросы по цели и матчит ответ. CVE, мисконфиги, exposure. | `brew install nuclei` |
+| Scanner | What | Install |
+|---|---|---|
+| **nuclei** | Template-based: sends real HTTP requests at the target and matches responses. CVEs, misconfigurations, exposure. | `brew install nuclei` |
 
-**Только против запущенного сервиса.** Гейт авторизации — в `scan.py`
-(`is_local_target` + `--authorized`): localhost/приватные IP свободно, публичные
-домены — лишь с явным флагом.
+**Only against a running service.** The authorisation gate lives in `scan.py`
+(`is_local_target` + `--authorized`): localhost and private IPs are free, public
+domains require the explicit flag.
 
-Более тяжёлый DAST — **OWASP ZAP** (`brew install --cask zap`): краулит
-приложение и делает active scan с бОльшим покрытием, чем nuclei, но медленнее и
-требует настройки. Не подключён по умолчанию; добавить как `scan_zap` по образцу
-`scan_nuclei`, если нужен полноценный веб-скан с обходом форм/сессий.
+For heavier DAST there is **OWASP ZAP** (`brew install --cask zap`): it crawls
+the application and runs an active scan with broader coverage than nuclei, but
+slower and requiring setup. Not wired in by default; add it as `scan_zap`
+modelled on `scan_nuclei` if you need a full web scan that walks forms and
+sessions.
 
-### recon (внешняя разведка живого URL, без внешних CLI)
+### recon (external reconnaissance of a live URL, no external CLI)
 
-Слой на чистом stdlib — работает на голой машине, ставить нечего. Пробы:
+A pure-stdlib layer — it works on a bare machine with nothing to install. Probes:
 
-| Проба | Что | Тип | Гейт |
-|-------|-----|-----|------|
-| **git-exposure** | `/.git/HEAD\|config\|index\|logs/HEAD`, классификация по сигнатуре содержимого (не по статус-коду) | активная | да |
-| **security-headers** | HSTS/CSP/X-Frame/X-Content-Type + отражающий CORS с credentials | активная | да |
-| **js-secrets** | секреты в прод-JS-бандлах (AWS/Stripe/Slack/GitHub/private key); значения маскируются | активная | да |
-| **shodan-internetdb** | открытые порты + известные CVE по IP через `internetdb.shodan.io` (без ключа) | пассивная | нет |
-| **email-spoofability** | SPF/DMARC → риск подделки почты (нужен `dig`) | пассивная | нет |
+| Probe | What | Type | Gated |
+|---|---|---|---|
+| **git-exposure** | `/.git/HEAD\|config\|index\|logs/HEAD`, classified by content signature rather than status code | active | yes |
+| **security-headers** | HSTS/CSP/X-Frame/X-Content-Type plus reflective CORS with credentials | active | yes |
+| **js-secrets** | secrets in production JS bundles (AWS/Stripe/Slack/GitHub/private keys); values are masked | active | yes |
+| **shodan-internetdb** | open ports and known CVEs by IP via `internetdb.shodan.io` (no key needed) | passive | no |
+| **email-spoofability** | SPF/DMARC → mail spoofing risk (requires `dig`) | passive | no |
 
-**Активная vs пассивная.** Активные пробы шлют GET на **цель** → тот же гейт, что
-nuclei (localhost свободно, публичный домен — только `--authorized`). Пассивные
-бьют по **Shodan/DNS**, не по цели, → работают без гейта. `email-spoofability`
-пропускается, если нет `dig` (`brew install bind` / уже есть в macOS).
+**Active vs passive.** Active probes send GETs to **the target** → the same gate
+as nuclei (localhost free, public domain only with `--authorized`). Passive
+probes hit **Shodan/DNS**, not the target, so they need no gate.
+`email-spoofability` is skipped when `dig` is unavailable (`brew install bind`;
+already present on macOS).
 
-Расширения этого слоя, НЕ подключённые (тяжёлые внешние тулы): subdomain enum
-(`subfinder`/`amass`) + wildcard-DNS фильтр; фетч JS через полноценный краулер
-(`katana`). Добавлять по образцу существующих проб.
+Extensions to this layer that are deliberately NOT wired in (heavy external
+tools): subdomain enumeration (`subfinder`/`amass`) with a wildcard-DNS filter,
+and JS fetching through a full crawler (`katana`). Add them modelled on the
+existing probes.
 
-## Установить всё разом
+## Install everything at once
 
 ```bash
 brew install semgrep gitleaks osv-scanner trivy hadolint nuclei
 pip install bandit
 ```
 
-## Как добавить сканер в оркестратор
+## Adding a scanner to the orchestrator
 
-1. Напиши функцию `scan_<tool>(target, timeout, raw_dir) -> ToolResult` по образцу
-   существующих: проверь `have("<tool>")`, запусти через `run_cmd`, распарси
-   вывод, сложи находки через `finding(...)` (это нормализует severity и обрезает
-   поля), верни `ToolResult`.
-2. Добавь её в нужный список: `SAST_SCANNERS` / `SECRETS_SCANNERS` /
-   `DEPS_SCANNERS` / `IAC_SCANNERS`, а для recon — `RECON_ACTIVE_SCANNERS`
-   (бьёт по цели, под гейтом) или `RECON_PASSIVE_SCANNERS` (бьёт по стороннему
-   сервису/DNS, без гейта). DAST обрабатывается инлайн в `main` из-за гейта.
-3. Всегда лови `TimeoutExpired` и `JSONDecodeError` отдельно — это самые частые
-   отказы сканеров, и они не должны ронять весь прогон.
+1. Write `scan_<tool>(target, timeout, raw_dir) -> ToolResult` modelled on the
+   existing ones: check `have("<tool>")`, run it through `run_cmd`, parse the
+   output, add findings via `finding(...)` (which normalises severity and trims
+   fields), return a `ToolResult`.
+2. Register it in the right list: `SAST_SCANNERS` / `SECRETS_SCANNERS` /
+   `DEPS_SCANNERS` / `IAC_SCANNERS`; for recon, `RECON_ACTIVE_SCANNERS` (hits the
+   target, gated) or `RECON_PASSIVE_SCANNERS` (hits a third-party service or DNS,
+   ungated). DAST is handled inline in `main` because of the gate.
+3. Always catch `TimeoutExpired` and `JSONDecodeError` separately — they are the
+   most common scanner failures, and neither should bring down the run.
 
-Ключевой инвариант: **сканер, который упал или не установлен, никогда не роняет
-скан** — только помечает свой `status`. Это чтобы «проверить безопасность» на
-голой машине всё равно давало частичный результат, а не ошибку.
+The key invariant: **a scanner that crashes or is missing never fails the scan** —
+it only marks its own `status`. That way "check the security of this" on a bare
+machine still yields a partial result rather than an error.
