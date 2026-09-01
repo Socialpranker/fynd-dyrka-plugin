@@ -1,78 +1,84 @@
-# Триаж находок сканеров — Шаг 6
+# Triaging scanner findings — Step 6
 
-> Читается на Шаге 6, после прогона оркестратора. Порядок вопросов к находке,
-> ловушки дедупа и идентификаторов, детерминированное правило контекстной
-> severity.
+> Read this on Step 6, after the orchestrator run. The order of questions to ask
+> a finding, the deduplication and identifier traps, and a deterministic rule for
+> contextual severity.
 
-Пройди `tools[].findings` и для каждой значимой находки реши:
+Walk `tools[].findings` and decide, for each finding that matters:
 
-⚠️ Гонял `platform` отдельно на Шаге 2 — у тебя **два** JSON, а не один. Возьми
-`tools[]` из обоих: находки о проде (публичный адрес хранилища, суперюзер в
-connection string, прод-секрет, совпавший с локальным `.env`) приходят только из
-первого и в вывод Шага 5 не попадают.
+⚠️ If you ran `platform` separately on Step 2 you have **two** JSON documents,
+not one. Take `tools[]` from both: production findings (a public storage address,
+a superuser in the connection string, a production secret matching the local
+`.env`) come only from the first and are absent from the Step 5 output.
 
-1. **Реальна ли?** gitleaks на `tests/fixtures/sample.js` или `demo/…` — почти
-   всегда тестовая заглушка, не утечка. semgrep-паттерн в мёртвом коде —
-   ниже приоритет. Помечай такое как ложное/низкое **с причиной**, не молча.
-2. **Достижима ли?** Уязвимость в зависимости, которая не вызывается; endpoint
-   за аутентификацией — понижай. Не роняй severity произвольно: обоснуй.
+1. **Is it real?** gitleaks hitting `tests/fixtures/sample.js` or `demo/…` is
+   almost always a test stub, not a leak. A semgrep pattern in dead code ranks
+   lower. Mark such items false or low **with the reason**, never silently.
+2. **Is it reachable?** A vulnerability in a dependency that is never called, or
+   an endpoint behind authentication — lower it. Do not drop severity
+   arbitrarily: justify it.
 
-   ⚠️ **Отдельно спроси: это вообще зависимость проекта или чужой бинарник в
-   `node_modules`?** Сканеры, читающие бинарные артефакты (grype, trivy fs),
-   заглядывают **внутрь** скомпилированных тулов и репортят уязвимости их
-   рантайма, а не твоего кода. Замер на JS-проекте: grype дал 56 находок, все
-   до одной — `stdlib go1.20.12` внутри бинарника `esbuild` в
-   `node_modules/vite/`, при том что в проекте нет ни строки Go; npm-уязвимостей
-   он не нашёл ни одной, а osv-scanner на том же дереве дал 5 настоящих (vite,
-   vitest, esbuild как npm-пакеты). Признак этого класса шума: тип артефакта не
-   совпадает со стеком проекта, путь ведёт в `node_modules`/`vendor`/`bin`,
-   уязвимость в стандартной библиотеке чужого языка. Отсеивай пачкой, одной
-   строкой с причиной — но **сначала проверь, не уезжает ли этот бинарник в
-   прод-образ** (dev-зависимость сборщика — нет; тул, скопированный в финальный
-   слой Dockerfile, — да, и тогда находка настоящая).
-3. **Часть ли цепочки?** Сведи находки сканеров И ручные находки из Шага 3 в
-   цепочки: утёкший ключ + открытый admin-эндпоинт + отсутствие rate-limit =
-   атака серьёзнее суммы частей. Строй `attack_chains` явно — по правилу
-   `requires`/`amplifiers`/`severity+1` из **`references/attack-chains.md`** (там
-   же 4 готовых шаблона: credential-leak→cloud-pivot, subdomain-takeover→phishing,
-   exposed-git→credential-harvest, weak-tls→mitm). Цепочка — не сноска, а
-   первоклассная сущность отчёта.
-4. **Дедуп.** ⚠️ osv-scanner отдаёт `GHSA-…`/`OSV-…`, trivy-fs — `CVE-…`:
-   **одна уязвимость под разными идентификаторами**, сравнение строк её не
-   склеит. Дедупь по «пакет + версия + класс бага», идентификаторы перечисляй
-   оба (`GHSA-xxx / CVE-yyy`). semgrep и bandit часто дают одно место.
-5. **Молчание сканера — не аргумент.** Если сканер молчит там, где ты нашёл
-   дыру руками, это ожидаемо: логические баги ему структурно недоступны.
-   Не понижай свою находку из-за того, что её «никто не подтвердил».
-6. **Крик сканера — тоже не аргумент.** Симметричное правило: сработавшее
-   правило — кандидат, а не факт. Для базовой точки отсчёта: голый semgrep на
-   OWASP Benchmark даёт ~39% ложных при 80% верных — то есть каждая третья-
-   четвёртая находка неверна ещё до твоего триажа. Поэтому находку сканера,
-   которую ты собрался тащить в CRITICAL/HIGH, прогоняй через
-   фальсификационный проход Шага 3 наравне со своими: открой код, проверь
-   достижимость, попробуй опровергнуть. Не переписывай `message` сканера в
-   отчёт как вывод — это его гипотеза, не твоя проверка.
-7. **Проставь MITRE ATT&CK ID** каждой значимой находке по таблице
-   **`references/mitre-map.md`** (тип/шаблон → keyword → дефолт по классу). Это
-   стандартный язык отчёта, который сканеры не дают, а заказчик/комплаенс ждёт.
+   ⚠️ **Ask separately: is this even a project dependency, or someone else's
+   binary inside `node_modules`?** Scanners that read binary artefacts (grype,
+   trivy fs) look **inside** compiled tools and report vulnerabilities in their
+   runtime rather than in your code. Measurement on a JS project: grype returned
+   56 findings, every one of them `stdlib go1.20.12` inside the `esbuild` binary
+   under `node_modules/vite/`, in a project containing no Go at all; it found zero
+   npm vulnerabilities, while osv-scanner on the same tree found 5 real ones
+   (vite, vitest, esbuild as npm packages). The tell for this class of noise: the
+   artefact type does not match the project's stack, the path leads into
+   `node_modules`/`vendor`/`bin`, and the vulnerability is in another language's
+   standard library. Filter them out in bulk with a one-line reason — but **first
+   check whether that binary ships into the production image** (a build-time dev
+   dependency does not; a tool copied into the final Dockerfile layer does, and
+   then the finding is real).
+3. **Is it part of a chain?** Fold scanner findings AND your manual findings from
+   Step 3 into chains: a leaked key plus an open admin endpoint plus no rate
+   limiting is an attack worse than the sum of its parts. Build `attack_chains`
+   explicitly using the `requires`/`amplifiers`/`severity+1` rule from
+   **`references/attack-chains.md`** (which also carries four ready templates:
+   credential-leak→cloud-pivot, subdomain-takeover→phishing,
+   exposed-git→credential-harvest, weak-tls→mitm). A chain is not a footnote but
+   a first-class part of the report.
+4. **Deduplication.** ⚠️ osv-scanner emits `GHSA-…`/`OSV-…`, trivy-fs emits
+   `CVE-…`: **one vulnerability under different identifiers**, which string
+   comparison will not merge. Deduplicate on "package + version + bug class" and
+   list both identifiers (`GHSA-xxx / CVE-yyy`). semgrep and bandit frequently
+   report the same location.
+5. **Scanner silence is not an argument.** If a scanner says nothing where you
+   found a hole by hand, that is expected: logic bugs are structurally out of its
+   reach. Do not lower your finding because "nothing confirmed it".
+6. **Scanner noise is not an argument either.** The symmetric rule: a fired rule
+   is a candidate, not a fact. For a baseline, bare semgrep on the OWASP Benchmark
+   yields roughly 39% false positives at 80% true positives — every third or
+   fourth finding is wrong before your triage begins. So a scanner finding you
+   intend to carry into CRITICAL/HIGH goes through the Step 3 falsification pass
+   exactly like your own: open the code, check reachability, try to refute it. Do
+   not copy the scanner's `message` into the report as a conclusion — it is its
+   hypothesis, not your verification.
+7. **Assign a MITRE ATT&CK ID** to every finding that matters, using
+   **`references/mitre-map.md`** (type/template → keyword → class default). It is
+   the standard report vocabulary that scanners do not provide and that clients
+   and compliance expect.
 
-**Контекстная severity (детерминированное правило, а не «на глаз»).** Базовую
-severity корректируй ступенчато (INFO=1…CRITICAL=5, кламп 1-5). ⚠️ Потолок
-`[UNVERIFIED]` применяется **последним и перебивает результат**: находка без
-воспроизводящего прогона остаётся MEDIUM, сколько бы плюсов ни дали ступени.
-Неподтверждённый IDOR на `/checkout` — это MEDIUM `[UNVERIFIED]`, не HIGH:
-- **WAF перед целью** → −1 (эксплуатация сложнее);
-- **чувствительный эндпоинт** (`/admin`, `/checkout`, `/payment`, `/login`,
+**Contextual severity (a deterministic rule, not a feel).** Adjust the base
+severity in steps (INFO=1…CRITICAL=5, clamped to 1–5). ⚠️ The `[UNVERIFIED]` cap
+is applied **last and overrides the result**: a finding without a reproducing run
+stays MEDIUM no matter how many pluses the steps awarded. An unconfirmed IDOR on
+`/checkout` is MEDIUM `[UNVERIFIED]`, not HIGH:
+- **a WAF in front of the target** → −1 (exploitation is harder);
+- **a sensitive endpoint** (`/admin`, `/checkout`, `/payment`, `/login`,
   `/oauth`) → +1;
-- **публичный weaponized PoC** → +1. Список, при виде которого эскалируешь
-  автоматически: `CVE-2021-44228`/`45046` (Log4Shell), `CVE-2017-5638` (Struts2),
+- **a public weaponised PoC** → +1. The list that escalates automatically on
+  sight: `CVE-2021-44228`/`45046` (Log4Shell), `CVE-2017-5638` (Struts2),
   `CVE-2014-0160` (Heartbleed), `CVE-2017-0144` (EternalBlue), `CVE-2019-19781`
   (Citrix), `CVE-2020-1472` (Zerologon), `CVE-2021-26855`… (ProxyLogon),
   `CVE-2022-22965` (Spring4Shell), `CVE-2023-23397` (Outlook), `CVE-2024-3400`
-  (Palo Alto); плюс текст «exploit available / public PoC / metasploit».
+  (Palo Alto); plus the phrases "exploit available / public PoC / metasploit".
 
-Итоговый приоритет: реальный утёкший рабочий секрет, RCE/injection в достижимом
-коде, **воспроизведённый** SSRF/auth-байпас — CRITICAL. Уязвимая прод-зависимость
-с эксплойтом, broken auth, IDOR — HIGH. Отсутствие security-заголовков, слабый
-мисконфиг, гонка без явного денежного ущерба — MEDIUM/LOW. Не раздувай severity
-ради драмы и не глуши реальное ради «чистого» отчёта.
+Final priority: a real leaked working secret, RCE or injection in reachable code,
+and a **reproduced** SSRF or auth bypass are CRITICAL. A vulnerable production
+dependency with an exploit, broken auth, and IDOR are HIGH. Missing security
+headers, a weak misconfiguration, and a race with no demonstrated monetary damage
+are MEDIUM/LOW. Do not inflate severity for drama, and do not mute something real
+to keep the report clean.

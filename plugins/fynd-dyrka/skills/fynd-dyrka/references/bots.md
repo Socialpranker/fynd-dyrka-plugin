@@ -1,104 +1,111 @@
-# Аудит бота как интерфейса
+# Auditing a bot as an interface
 
-Читай, когда цель — Telegram/Discord-бот или Mini App. Бот отличается от
-веб-сервиса тем, что **транспорт чужой**: аутентификацию пользователя делает
-не твой код, а платформа, и ошибка обычно не в бизнес-логике, а в том, как
-именно её результату доверяют.
+Read this when the target is a Telegram/Discord bot or a Mini App. A bot differs
+from a web service in that **the transport belongs to someone else**: user
+authentication is performed by the platform rather than by your code, and the bug
+is usually not in the business logic but in how much its result is trusted.
 
-Всё ниже — вопросы к коду, а не список «сделай хорошо». Ответ «не нашёл, где
-это проверяется» — уже находка.
+Everything below is a question to ask the code, not a list of good intentions.
+"I could not find where this is checked" is already a finding.
 
-## 1. Подлинность запроса: кто вообще говорит с ботом
+## 1. Request authenticity: who is actually talking to the bot
 
 ### Webhook
 
-- Проверяется ли, что запрос пришёл от Telegram? Механизм — `secret_token` в
-  `setWebhook`, приходит в заголовке **`X-Telegram-Bot-Api-Secret-Token`**.
-- URL вебхука **не секрет**: утекает в логи, прокси, историю. Если проверки
-  источника нет вовсе, любой знающий URL шлёт произвольные `Update` — от имени
-  любого `user_id`, включая поддельные `successful_payment` и `callback_query`.
-  Это полный обход прав **без знания токена бота**.
-- Сравнение секрета — `compare_digest`/`timingSafeEqual`, не `==`.
+- Is it verified that the request came from Telegram? The mechanism is
+  `secret_token` in `setWebhook`, delivered in the
+  **`X-Telegram-Bot-Api-Secret-Token`** header.
+- The webhook URL is **not a secret**: it leaks into logs, proxies, history. With
+  no origin check at all, anyone who knows the URL can send arbitrary `Update`
+  objects — on behalf of any `user_id`, including forged `successful_payment` and
+  `callback_query`. That is a complete authorisation bypass **without knowing the
+  bot token**.
+- Compare the secret with `compare_digest`/`timingSafeEqual`, not `==`.
 
 ### Mini App `initData`
 
-Алгоритм (проверено расчётом, не по памяти):
+The algorithm (verified by computation, not from memory):
 
 ```
-secret_key       = HMAC_SHA256(key="WebAppData", msg=bot_token)
-data_check_string= "\n".join(f"{k}={v}" for k,v in sorted(fields))   # без hash
-expected         = HEX(HMAC_SHA256(key=secret_key, msg=data_check_string))
+secret_key        = HMAC_SHA256(key="WebAppData", msg=bot_token)
+data_check_string = "\n".join(f"{k}={v}" for k, v in sorted(fields))   # hash excluded
+expected          = HEX(HMAC_SHA256(key=secret_key, msg=data_check_string))
 ```
 
-**Login Widget выводит ключ иначе** — `secret_key = SHA256(bot_token)`, без
-промежуточного HMAC. Алгоритмы несовместимы: проверка Mini App чужим ключом
-даёт `False` всегда. Копипаста между этими двумя — типовой источник бага
-«hash никогда не сходится», а чинят его обычно тем, что валидацию ослабляют.
+**The Login Widget derives its key differently** — `secret_key = SHA256(bot_token)`,
+with no intermediate HMAC. The two are incompatible: validating Mini App data
+with the widget's key always returns `False`. Copy-pasting between them is the
+standard source of "the hash never matches", and the usual repair is to weaken
+the validation.
 
-Что искать в коде:
+What to look for in the code:
 
-- поле `hash` **исключено** из `data_check_string`? (иначе не сойдётся никогда);
-- сортировка ключей лексикографическая по байтам, не locale-aware;
-- сравнение constant-time, а не `==`/`===`;
-- `sha256`, а не другой алгоритм; ключ выведен через `"WebAppData"`;
-- URL-decode сделан ровно один раз;
-- **самое важное:** что происходит в ветке «не сошлось»? Ищи fallback вида
-  «в dev пропускаем», «если нет `initData` — берём `user_id` из тела запроса».
-  Такая ветка обнуляет всю проверку — и именно она обычно и есть находка.
+- is the `hash` field **excluded** from `data_check_string`? (otherwise it can
+  never match);
+- keys sorted lexicographically by byte, not locale-aware;
+- constant-time comparison rather than `==`/`===`;
+- `sha256`, and the key derived through `"WebAppData"`;
+- URL-decoding performed exactly once;
+- **most important:** what happens in the "did not match" branch? Look for a
+  fallback such as "skip in dev" or "if there is no `initData`, take `user_id`
+  from the request body". That branch nullifies the entire check — and it is
+  usually the finding.
 
 ### Replay: `auth_date`
 
-- `auth_date` проверяется на протухание? Без TTL перехваченный `initData`
-  (логи, скриншот URL, WebView) работает **бессрочно** — это полноценный
-  auth bypass с правами исходного пользователя.
-- Жёсткого окна Telegram публично не декларирует; практика — ≤3600 с, для
-  чувствительных операций 300–900 с. Если TTL нет вообще — находка независимо
-  от выбранной цифры.
+- Is `auth_date` checked for staleness? With no TTL, captured `initData` (logs, a
+  screenshotted URL, a WebView) works **forever** — a full auth bypass with the
+  original user's rights.
+- Telegram does not publicly declare a hard window; practice is ≤3600 s, and
+  300–900 s for sensitive operations. No TTL at all is a finding regardless of
+  which number you would have picked.
 
-## 2. Авторизация: что можно подделать, а что нет
+## 2. Authorisation: what can be forged and what cannot
 
-- `from.id` контролирует Telegram — подделать его через штатный клиент нельзя
-  (но можно, если п.1 не выполнен, см. webhook выше).
-- ⚠️ В группах у анонимных админов и сообщений от имени канала `from` не тот,
-  кого ждёт код, — приходит **`sender_chat`**. Проверка вида «это админ, потому
-  что `from.id` в списке» здесь ведёт себя не так, как задумано.
-- Админ-команды (`/broadcast`, `/setprice`, `/grant`) — есть allowlist по
-  `user_id`, или защита в том, что имя команды никто не знает?
-- **`callback_data` — недоверенный вход.** Приходит от клиента; сторонние
-  библиотеки и MTProto позволяют прислать произвольную строку. Бот, встроивший
-  в неё `user_id`, сумму или права (`grant_admin:456`), обязан перепроверить
-  владение и права по `callback_query.from.id`, а не по содержимому строки.
-  Лимит размера — 1–64 байта UTF-8.
+- `from.id` is controlled by Telegram and cannot be forged through a normal
+  client — unless §1 is unmet, see the webhook above.
+- ⚠️ In groups, anonymous administrators and messages sent on behalf of a channel
+  do not carry the `from` the code expects — they carry **`sender_chat`**. A check
+  of the form "this is an admin because `from.id` is in the list" does not behave
+  as intended there.
+- Admin commands (`/broadcast`, `/setprice`, `/grant`) — is there an allowlist by
+  `user_id`, or is the protection that nobody knows the command name?
+- **`callback_data` is untrusted input.** It comes from the client; third-party
+  libraries and MTProto can send an arbitrary string. A bot that embedded a
+  `user_id`, an amount or a permission in it (`grant_admin:456`) must re-check
+  ownership and rights against `callback_query.from.id`, not against the string's
+  contents. Size limit: 1–64 bytes of UTF-8.
 
-## 3. Гонки на кнопках
+## 3. Races on buttons
 
-Два быстрых тапа = два `callback_query` до того, как обработан первый. Если
-обработчик делает read-modify-write (списать баллы, выдать бонус, подтвердить
-заказ) — это тот же double-spend, что и в вебе.
+Two quick taps produce two `callback_query` events before the first is handled.
+If the handler does read-modify-write (deduct points, grant a bonus, confirm an
+order) that is the same double-spend as on the web.
 
-Что считается защитой, а что нет:
+What counts as a defence and what does not:
 
-- ✅ атомарный апдейт с условием (`UPDATE … WHERE status='pending'` + проверка
-  числа затронутых строк) или `SELECT … FOR UPDATE`;
-- ✅ лок по `(user_id, action)` с коротким TTL;
-- ⚠️ идемпотентность по `callback_query.id` спасает только от повторной
-  доставки **одного** апдейта, не от двух разных нажатий;
-- ⚠️ `answerCallbackQuery` + снятие клавиатуры — UX-слой поверх атомарности,
-  сам по себе гонку не закрывает.
+- ✅ an atomic conditional update (`UPDATE … WHERE status='pending'` plus a check
+  of the affected row count) or `SELECT … FOR UPDATE`;
+- ✅ a lock on `(user_id, action)` with a short TTL;
+- ⚠️ idempotency on `callback_query.id` only protects against redelivery of **one**
+  update, not against two distinct taps;
+- ⚠️ `answerCallbackQuery` plus removing the keyboard is a UX layer on top of
+  atomicity; on its own it does not close the race.
 
-Здесь особенно полезен приём «сравни похожие места» (Шаг 3): в боте обычно
-несколько обработчиков кнопок, и защищён чаще один.
+The "compare similar places" technique (Step 3) pays off especially here: a bot
+usually has several button handlers, and typically only one of them is protected.
 
-## 4. Входящие файлы и состояние диалога
+## 4. Incoming files and dialogue state
 
-- Ограничены размер и MIME входящих документов? Без этого — DoS большими
-  файлами, zip-бомбы и decompression bombs, если бот распаковывает или
-  обрабатывает картинки.
-- Имя файла от пользователя попадает в путь сохранения? Path traversal.
-- `file_id` — **не право доступа**: он валиден только для выдавшего бота, но
-  ни к какому пользователю не привязан. Если бот отдаёт файл по `file_id` из
-  запроса без проверки владения в своей БД — утечка чужого контента.
-- Состояние диалога (FSM): ключуется по `user_id` **и** `chat_id`? Ключ только
-  по одному из них в группах смешивает сессии разных людей. Переход состояния
-  выводится на сервере или задаётся тем, что прислал клиент (см. «Обход шагов
-  процесса» в Шаге 3)?
+- Are the size and MIME type of incoming documents limited? Without that: DoS by
+  large files, zip bombs and decompression bombs if the bot unpacks archives or
+  processes images.
+- Does a user-supplied filename reach the storage path? Path traversal.
+- `file_id` is **not an access right**: it is valid only for the issuing bot, but
+  is bound to no particular user. A bot that serves a file by `file_id` from the
+  request without checking ownership in its own database leaks other people's
+  content.
+- Dialogue state (FSM): is it keyed by `user_id` **and** `chat_id`? Keying by only
+  one of them mixes different people's sessions in groups. Is the state
+  transition derived server-side, or dictated by what the client sent (see
+  "Skipping process steps" in Step 3)?

@@ -1,46 +1,46 @@
-# Построение цепочек атак
+# Building attack chains
 
-Скилл строит `attack_chains` «на глаз» — этот справочник даёт детерминированное
-правило и стартовый набор шаблонов, чтобы цепочки собирались одинаково и не
-терялись.
+The skill assembles `attack_chains` by judgement — this reference gives a
+deterministic rule and a starter set of templates, so chains come out consistent
+instead of being lost.
 
-## Правило (переносимо как есть, кода не требует)
+## The rule (portable as written, needs no code)
 
-1. Каждой находке проставь MITRE ATT&CK ID (см. `mitre-map.md`).
-2. **Цепочка** = набор находок, где одна создаёт **предпосылку** (`requires`),
-   а другие её **усиливают** (`amplifiers`).
-3. Правило цепочки срабатывает, только если **все** `requires` присутствуют в
-   текущем скане. `amplifiers` опциональны: есть — добавляют шаг, нет — правило
-   всё равно срабатывает.
-4. **Severity цепочки = max(severity компонентов) + 1 ступень**, но не выше
-   CRITICAL. Комбинация опаснее суммы частей — в этом весь смысл цепочки.
-5. Каждой цепочке — нарратив в 1-2 предложения: **что именно получает
-   атакующий**, соединив эти находки, а не пересказ находок по отдельности.
+1. Assign a MITRE ATT&CK ID to every finding (see `mitre-map.md`).
+2. A **chain** is a set of findings where one creates a **precondition**
+   (`requires`) and the others **amplify** it (`amplifiers`).
+3. A chain rule fires only when **all** its `requires` are present in the current
+   scan. `amplifiers` are optional: present, they add a step; absent, the rule
+   still fires.
+4. **Chain severity = max(component severity) + one step**, capped at CRITICAL.
+   The combination is worse than the sum of its parts — that is the whole point.
+5. Give each chain a one- or two-sentence narrative: **what the attacker actually
+   gets** by joining these findings, not a restatement of each finding.
 
-## Стартовый набор шаблонов
+## Starter templates
 
-Распознавай по духу, не только по точному ID — если находки ложатся в шаблон
-смыслово, применяй, даже когда ATT&CK ID слегка другой.
+Recognise them by substance, not only by exact ID — if findings fit a template
+in meaning, apply it even when the ATT&CK ID differs slightly.
 
-| Цепочка | requires | amplifiers | Что получает атакующий |
+| Chain | requires | amplifiers | What the attacker gets |
 |---|---|---|---|
-| **credential-leak → cloud-pivot** | утёкший ключ (T1552.001) | внешний доступ / открытый API (T1133, T1190) | Ключ в коде/JS → доступ к провайдеру; если это AWS/GCP-ключ + открытый DB/API — полный pivot в облако |
-| **subdomain-takeover → phishing** | takeover домена (T1584.001) | слабый SPF/DMARC (T1566.001) | Контроль доверенного поддомена + возможность слать почту «от компании» = правдоподобный фишинг с легитимного origin |
-| **exposed-git → credential-harvest** | открытый `.git` (T1213.003) | утёкший ключ (T1552.001) | Скачивание исходников из `.git` → секреты в истории коммитов, которых нет в рабочем дереве |
-| **weak-tls → mitm** | слабый TLS (T1040) | default creds (T1078) | Перехват трафика; если ещё и дефолтные учётки — MITM сразу получает авторизованную сессию |
+| **credential-leak → cloud-pivot** | leaked key (T1552.001) | external access / open API (T1133, T1190) | A key in code or JS → provider access; with an AWS/GCP key plus an open DB or API, a full pivot into the cloud account |
+| **subdomain-takeover → phishing** | domain takeover (T1584.001) | weak SPF/DMARC (T1566.001) | Control of a trusted subdomain plus the ability to send mail "from the company" = credible phishing from a legitimate origin |
+| **exposed-git → credential-harvest** | exposed `.git` (T1213.003) | leaked key (T1552.001) | Source pulled from `.git` → secrets in commit history that are absent from the working tree |
+| **weak-tls → mitm** | weak TLS (T1040) | default credentials (T1078) | Traffic interception; with default credentials, the MITM lands straight in an authenticated session |
 
-Эти четыре — не предел. Если находки складываются в цепочку, для которой шаблона
-нет (например SSRF → доступ к metadata → временные креды → облако), собери её по
-тому же правилу requires/amplifiers/severity+1 и опиши нарративом.
+These four are not the limit. If findings form a chain with no template — SSRF →
+metadata access → temporary credentials → cloud, say — assemble it with the same
+requires/amplifiers/severity+1 rule and write the narrative.
 
-## Формат цепочки в отчёте
+## Chain format in the report
 
 ```
-### <название цепочки>
-1. <находка-предпосылка> → 2. <усилитель> → 3. <impact>
-**Severity:** <max+1, capped CRITICAL>
-**Итог:** <что получает атакующий одной фразой>
+### <chain name>
+1. <precondition finding> → 2. <amplifier> → 3. <impact>
+**Severity:** <max+1, capped at CRITICAL>
+**Bottom line:** <what the attacker gets, in one sentence>
 ```
 
-Цепочка — это первоклассная сущность отчёта, а не сноска: она объясняет, почему
-три «средних» находки вместе = критичный риск.
+A chain is a first-class part of the report, not a footnote: it explains why
+three "medium" findings together are a critical risk.
