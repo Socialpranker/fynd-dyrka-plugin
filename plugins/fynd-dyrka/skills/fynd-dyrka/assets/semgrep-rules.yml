@@ -1,16 +1,17 @@
-# Кастомные semgrep-правила fynd-dyrka.
+# fynd-dyrka custom semgrep rules.
 #
-# ЗАЧЕМ отдельно от --config auto: замер показал, что auto ловит из этого
-# набора лишь eval и CI-инъекцию, а 5 частых для Next.js/TS-стека классов
-# пропускает (DOM XSS, NEXT_PUBLIC_ утечка, SQL-конкатенация в route,
-# $queryRawUnsafe). Эти правила не дублируют auto — закрывают его дыры.
+# WHY separate from --config auto: measurement showed auto catches only eval
+# and CI injection out of this set, missing 5 classes common to the Next.js/TS
+# stack (DOM XSS, NEXT_PUBLIC_ leakage, SQL concatenation in a route,
+# $queryRawUnsafe). These rules do not duplicate auto — they close its gaps.
 #
-# Подключается вторым проходом: semgrep scan --config <этот файл>. Находки
-# идут в тот же слой sast. Правила намеренно узкие и high-precision —
-# лучше пропустить, чем завалить отчёт ложными (триаж дороже пропуска здесь).
+# Wired in as a second pass: semgrep scan --config <this file>. Findings go
+# into the same sast layer. The rules are deliberately narrow and
+# high-precision — better to miss one than to flood the report with false
+# positives (triage costs more than a miss here).
 #
-# ВАЖНО (YAML): любой pattern с ": " бери в кавычки, иначе YAML трактует
-# двоеточие как mapping и валидатор падает.
+# IMPORTANT (YAML): quote any pattern containing ": ", otherwise YAML reads
+# the colon as a mapping and the validator fails.
 
 rules:
   # --- DOM XSS sinks -------------------------------------------------------
@@ -18,8 +19,8 @@ rules:
     languages: [typescript, javascript]
     severity: WARNING
     message: >-
-      dangerouslySetInnerHTML с непроверенным вводом даёт DOM XSS. Убедись,
-      что __html санитизирован (DOMPurify) или значение полностью статично.
+      dangerouslySetInnerHTML with unchecked input gives DOM XSS. Make sure
+      __html is sanitised (DOMPurify) or the value is entirely static.
     metadata:
       cwe: "CWE-79 Cross-site Scripting"
       owasp: "A03:2021 Injection"
@@ -32,8 +33,8 @@ rules:
     languages: [typescript, javascript]
     severity: WARNING
     message: >-
-      Присваивание в .innerHTML/.outerHTML — DOM XSS, если правая часть
-      содержит пользовательский ввод. Используй textContent или санитизацию.
+      Assigning to .innerHTML/.outerHTML is DOM XSS when the right-hand side
+      carries user input. Use textContent, or sanitise.
     metadata:
       cwe: "CWE-79"
     patterns:
@@ -43,14 +44,15 @@ rules:
       - pattern-not: $EL.innerHTML = "..."
       - pattern-not: $EL.innerHTML = ""
 
-  # --- Секреты, уезжающие в клиент -----------------------------------------
+  # --- Secrets that ship to the client -------------------------------------
   - id: fd-next-public-secret-name
     languages: [generic]
     severity: ERROR
     message: >-
-      Переменная с префиксом NEXT_PUBLIC_ (или VITE_/REACT_APP_/PUBLIC_)
-      попадает в браузерный бандл. Если в имени secret/key/token/password —
-      секрет уходит клиенту. Держи секреты в серверных env без public-префикса.
+      A variable prefixed NEXT_PUBLIC_ (or VITE_/REACT_APP_/PUBLIC_) is
+      compiled into the browser bundle. If the name contains
+      secret/key/token/password, the secret ships to the client. Keep secrets in
+      server-side env vars with no public prefix.
     metadata:
       cwe: "CWE-200 Exposure of Sensitive Information"
     paths:
@@ -63,14 +65,14 @@ rules:
     patterns:
       - pattern-regex: "(NEXT_PUBLIC_|VITE_|REACT_APP_|PUBLIC_)[A-Z0-9_]*(SECRET|PRIVATE|PASSWORD|TOKEN|API_?KEY|CREDENTIAL)"
 
-  # --- SQL injection: конкатенация / raw ------------------------------------
+  # --- SQL injection: concatenation / raw -----------------------------------
   - id: fd-prisma-raw-unsafe-interpolation
     languages: [typescript, javascript]
     severity: ERROR
     message: >-
-      $queryRawUnsafe/$executeRawUnsafe со строковой интерполяцией даёт SQLi.
-      Используй $queryRaw с tagged-template (Prisma параметризует) или
-      передавай значения вторым аргументом.
+      $queryRawUnsafe/$executeRawUnsafe with string interpolation gives SQLi.
+      Use $queryRaw with a tagged template (Prisma parameterises it), or pass
+      values as the second argument.
     metadata:
       cwe: "CWE-89 SQL Injection"
       owasp: "A03:2021 Injection"
@@ -85,8 +87,9 @@ rules:
     languages: [typescript, javascript]
     severity: ERROR
     message: >-
-      SQL-запрос собран из template-строки с интерполяцией переменной —
-      возможна SQL-инъекция. Параметризуй запрос ($1/$2 + массив аргументов).
+      The SQL query is built from a template string with an interpolated
+      variable — SQL injection is possible. Parameterise it ($1/$2 plus an
+      argument array).
     metadata:
       cwe: "CWE-89"
     patterns:
@@ -95,14 +98,14 @@ rules:
           - pattern: "$DB.execute(`...${$X}...`)"
           - pattern: "$DB.raw(`...${$X}...`)"
 
-  # --- Слабое сравнение секретов (fail-open / timing) ----------------------
+  # --- Weak secret comparison (fail-open / timing) -------------------------
   - id: fd-secret-compared-with-loose-equality
     languages: [typescript, javascript]
     severity: WARNING
     message: >-
-      Сравнение секрета/токена/подписи через ==/=== вместо
-      crypto.timingSafeEqual даёт timing-атаку и риск fail-open при пустом
-      значении. Сравнивай постоянным по времени способом.
+      Comparing a secret, token or signature with ==/=== instead of
+      crypto.timingSafeEqual enables a timing attack and risks a fail-open on an
+      empty value. Compare in constant time.
     metadata:
       cwe: "CWE-208 Observable Timing Discrepancy"
     patterns:
@@ -119,10 +122,11 @@ rules:
     languages: [yaml]
     severity: ERROR
     message: >-
-      pull_request_target выполняется с секретами репозитория и правами записи,
-      а actions/checkout с ref из PR тянет недоверенный код форка — классический
-      pwn-request (кража секретов/запись в репо). Не чекаутить PR-код в
-      pull_request_target, либо строго изолировать без секретов.
+      pull_request_target runs with the repository's secrets and write access,
+      while actions/checkout with a ref from the PR pulls untrusted fork code —
+      the classic pwn-request (secret theft, writes to the repo). Do not check
+      out PR code under pull_request_target, or isolate it strictly with no
+      secrets.
     metadata:
       cwe: "CWE-829 Inclusion of Functionality from Untrusted Control Sphere"
     patterns:
@@ -136,9 +140,9 @@ rules:
     languages: [yaml]
     severity: ERROR
     message: >-
-      Недоверенный ввод PR (title/body/branch/author) интерполируется прямо в
-      shell-скрипт run: — инъекция команд в раннер. Пробрасывай через env-
-      переменную, а не через ${{ }} внутри run.
+      Untrusted PR input (title/body/branch/author) is interpolated straight
+      into the run: shell script — command injection on the runner. Pass it
+      through an env variable rather than ${{ }} inside run.
     metadata:
       cwe: "CWE-78 OS Command Injection"
     patterns:
@@ -153,9 +157,9 @@ rules:
     languages: [generic]
     severity: WARNING
     message: >-
-      Похоже на закоммиченный .env с реальным значением. .env не должен быть в
-      трекинге git — вынеси в .env.example со значениями-заглушками и добавь
-      .env* в .gitignore. Если значение боевое — отзови его.
+      This looks like a committed .env holding a real value. .env should not be
+      tracked by git — move it to .env.example with placeholder values and add
+      .env* to .gitignore. If the value is live, revoke it.
     metadata:
       cwe: "CWE-538 Insertion of Sensitive Information into Externally-Accessible File"
     paths:
@@ -170,14 +174,14 @@ rules:
     patterns:
       - pattern-regex: "^[A-Z][A-Z0-9_]*=.+"
 
-  # --- Инъекции: sink'и, которые auto пропускает или видит частично ---------
+  # --- Injection: sinks that auto misses or sees only partially -------------
   - id: fd-python-shell-true
     languages: [python]
     severity: ERROR
     message: >-
-      subprocess с shell=True — если хоть часть команды приходит извне, это RCE.
-      Передавай список аргументов без shell=True; пользовательские значения —
-      только как отдельные элементы списка, с "--" перед ними.
+      subprocess with shell=True is RCE if any part of the command comes from
+      outside. Pass an argument list without shell=True; user values go only as
+      separate list elements, with "--" before them.
     metadata:
       cwe: "CWE-78 OS Command Injection"
       owasp: "A03:2021 Injection"
@@ -190,7 +194,7 @@ rules:
           - pattern: subprocess.check_call(..., shell=True, ...)
           - pattern: os.system(...)
           - pattern: os.popen(...)
-      # Литерал целиком — команда фиксирована, подставить нечего.
+      # A full literal means the command is fixed, with nothing to inject.
       - pattern-not: subprocess.$F("...", ..., shell=True, ...)
       - pattern-not: os.system("...")
       - pattern-not: os.popen("...")
@@ -199,8 +203,8 @@ rules:
     languages: [typescript, javascript]
     severity: ERROR
     message: >-
-      child_process.exec/execSync запускает через шелл — конкатенация с вводом
-      даёт RCE. Бери execFile/spawn со списком аргументов.
+      child_process.exec/execSync runs through a shell — concatenating input
+      gives RCE. Use execFile/spawn with an argument list.
     metadata:
       cwe: "CWE-78"
     patterns:
@@ -218,8 +222,8 @@ rules:
     languages: [python]
     severity: ERROR
     message: >-
-      Десериализация недоверенных данных = выполнение кода. pickle/marshal не
-      имеют безопасного режима — меняй формат (JSON). Для YAML — yaml.safe_load.
+      Deserialising untrusted data means executing code. pickle/marshal have
+      no safe mode — change the format (JSON). For YAML, use yaml.safe_load.
     metadata:
       cwe: "CWE-502 Deserialization of Untrusted Data"
       owasp: "A08:2021 Software and Data Integrity Failures"
@@ -238,8 +242,8 @@ rules:
     languages: [python]
     severity: ERROR
     message: >-
-      Пользовательский ввод в ТЕЛО шаблона (а не в данные) = SSTI и обычно RCE.
-      Шаблон должен быть статичным, ввод передавай параметром рендера.
+      User input in the template BODY (not in its data) is SSTI and usually
+      RCE. The template must be static; pass input as a render parameter.
     metadata:
       cwe: "CWE-1336 Server-Side Template Injection"
     patterns:
@@ -255,8 +259,8 @@ rules:
     languages: [generic]
     severity: WARNING
     message: >-
-      v-html рендерит строку как HTML — XSS, если значение приходит от
-      пользователя. Используй интерполяцию {{ }} или санитизируй.
+      v-html renders a string as HTML — XSS when the value comes from a user.
+      Use {{ }} interpolation, or sanitise.
     metadata:
       cwe: "CWE-79"
     paths:
@@ -270,8 +274,9 @@ rules:
     languages: [typescript, javascript]
     severity: WARNING
     message: >-
-      Редирект по значению из запроса — open redirect (фишинг, кража токена из
-      OAuth-потока). Сверяй цель с allowlist, а не с "начинается на /".
+      Redirecting to a value from the request is an open redirect (phishing,
+      token theft from an OAuth flow). Check the destination against an
+      allowlist, not against "starts with /".
     metadata:
       cwe: "CWE-601 URL Redirection to Untrusted Site"
     patterns:
@@ -280,13 +285,13 @@ rules:
           - pattern: $RES.redirect(req.body.$P, ...)
           - pattern: $RES.redirect(req.params.$P, ...)
 
-  # --- Доступность и стоимость ---------------------------------------------
+  # --- Availability and cost ------------------------------------------------
   - id: fd-python-request-without-timeout
     languages: [python]
     severity: WARNING
     message: >-
-      Исходящий запрос без timeout висит бесконечно — воркеры и пул соединений
-      исчерпываются, сервис встаёт. Всегда задавай timeout=.
+      An outbound request with no timeout hangs indefinitely — workers and the
+      connection pool drain and the service stalls. Always set timeout=.
     metadata:
       cwe: "CWE-400 Uncontrolled Resource Consumption"
     patterns:
@@ -307,9 +312,9 @@ rules:
     languages: [generic]
     severity: WARNING
     message: >-
-      Вложенный квантификатор в регулярке — катастрофический backtracking
-      (ReDoS). Если строка приходит от пользователя, один запрос вешает поток.
-      Проверь замером на строке-убийце; в JS/Python/Java движок уязвим.
+      A nested quantifier in a regex means catastrophic backtracking (ReDoS).
+      If the string comes from a user, one request hangs a thread. Confirm by
+      measuring with a killer string; the JS/Python/Java engines are vulnerable.
     metadata:
       cwe: "CWE-1333 Inefficient Regular Expression Complexity"
     paths:
@@ -323,15 +328,15 @@ rules:
         - "*.php"
         - "*.rb"
     patterns:
-      # (a+)+ / (a*)* / (\d+)* и алгебраически эквивалентные формы
+      # (a+)+ / (a*)* / (\d+)* and algebraically equivalent forms
       - pattern-regex: "\\([^()\\n]*[+*]\\)\\s*[+*]"
 
   - id: fd-sql-select-without-limit
     languages: [generic]
     severity: INFO
     message: >-
-      SELECT без LIMIT на растущей таблице — один запрос тянет всё в память.
-      Добавь пагинацию с ВЕРХНЕЙ границей на стороне сервера.
+      SELECT with no LIMIT on a growing table pulls everything into memory in
+      one query. Add pagination with a server-side UPPER bound.
     metadata:
       cwe: "CWE-770 Allocation of Resources Without Limits or Throttling"
     paths:
@@ -347,8 +352,8 @@ rules:
     languages: [typescript, javascript]
     severity: WARNING
     message: >-
-      Лимит выборки берётся из запроса без верхней границы — клиент шлёт
-      limit=999999 и выгребает базу. Оберни в Math.min(x, MAX).
+      The result limit comes from the request with no upper bound — a client
+      sends limit=999999 and drains the database. Wrap it in Math.min(x, MAX).
     metadata:
       cwe: "CWE-770"
     patterns:
@@ -358,15 +363,15 @@ rules:
           - pattern: "{..., limit: Number(req.query.$P), ...}"
           - pattern: "{..., limit: parseInt(req.query.$P), ...}"
 
-  # --- LLM: пользовательский ввод в промпт ---------------------------------
+  # --- LLM: user input in the prompt ----------------------------------------
   - id: fd-llm-user-input-in-system-prompt
     languages: [python]
     severity: WARNING
     message: >-
-      Пользовательский текст склеен в SYSTEM-промпт — прямая prompt injection:
-      инструкции пользователя неотличимы от твоих. Держи пользовательский
-      контент в отдельном user-сообщении и ограничивай полномочия модели
-      (инструменты, побочные действия), а не фильтруй промпт.
+      User text concatenated into the SYSTEM prompt is direct prompt
+      injection: the user's instructions become indistinguishable from yours.
+      Keep user content in a separate user message and limit the model's
+      authority (tools, side effects) rather than filtering the prompt.
     metadata:
       cwe: "CWE-77 Command Injection"
       owasp: "LLM01:2025 Prompt Injection"

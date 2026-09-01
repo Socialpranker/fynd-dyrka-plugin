@@ -1,4 +1,4 @@
-"""HTTP API сервиса отчётов."""
+"""HTTP API of the reports service."""
 from flask import Flask, request, jsonify
 from db.queries import get_report, list_reports
 from lib.auth import require_user

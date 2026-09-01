@@ -1,4 +1,4 @@
-"""Доступ к БД отчётов."""
+"""Access to the reports database."""
 import sqlite3
 
 DB = "reports.db"

@@ -1,4 +1,4 @@
-"""Проверки URL перед внешними переходами и загрузками."""
+"""URL checks before outbound redirects and downloads."""
 import ipaddress
 import socket
 from urllib.parse import urlparse
@@ -8,7 +8,7 @@ ALLOWED_SCHEMES = frozenset({"http", "https"})
 
 
 def _host_allowed(host: str) -> bool:
-    """Точное совпадение либо поддомен с обязательной точкой перед суффиксом."""
+    """Exact match, or a subdomain with a mandatory dot before the suffix."""
     host = host.lower().rstrip(".")
     return any(host == a or host.endswith("." + a) for a in ALLOWED_HOSTS)
 
@@ -21,7 +21,7 @@ def validate_redirect(url: str) -> bool:
 
 
 def is_internal_host(url: str) -> bool:
-    """True, если хост резолвится хотя бы в один непубличный адрес."""
+    """True when the host resolves to at least one non-public address."""
     parsed = urlparse(url)
     if parsed.scheme not in ALLOWED_SCHEMES:
         return True

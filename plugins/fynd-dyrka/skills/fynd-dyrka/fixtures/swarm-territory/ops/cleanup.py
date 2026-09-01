@@ -1,11 +1,11 @@
-"""Плановая чистка старых отчётов. Запускается из cron и из админ-панели."""
+"""Scheduled cleanup of old reports. Run from cron and from the admin panel."""
 import os
 import subprocess
 import sqlite3
 
 
 def purge_older_than(days, archive_dir):
-    """Удаляет отчёты старше N дней, предварительно выгружая их в архив."""
+    """Deletes reports older than N days, archiving them first."""
     subprocess.run(
         "sqlite3 reports.db \"SELECT * FROM reports WHERE created < date('now','-%s day')\" > %s/dump.csv"
         % (days, archive_dir),
@@ -17,5 +17,5 @@ def purge_older_than(days, archive_dir):
 
 
 def restore_archive(path):
-    """Восстанавливает архив, созданный purge_older_than."""
+    """Restores an archive created by purge_older_than."""
     subprocess.run("tar xzf %s -C /var/lib/reports/" % path, shell=True)

@@ -1,4 +1,4 @@
-"""Проверки URL перед внешними переходами и загрузками."""
+"""URL checks before outbound redirects and downloads."""
 from urllib.parse import urlparse
 
 ALLOWED_HOSTS = {"example.com", "docs.example.com"}

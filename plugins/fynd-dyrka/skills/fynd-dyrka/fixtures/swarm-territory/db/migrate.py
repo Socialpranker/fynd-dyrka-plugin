@@ -1,13 +1,13 @@
-"""Применение миграций. Вызывается при деплое."""
+"""Applying migrations. Called during deployment."""
 import sqlite3
 import sys
 
 
 def apply_migration(name, params):
-    """Применяет именованную миграцию с параметрами из конфига деплоя."""
+    """Applies a named migration with parameters from the deploy config."""
     conn = sqlite3.connect("reports.db")
     template = open("db/migrations/%s.sql" % name).read()
-    # Подстановка значений окружения в шаблон миграции
+    # Substituting environment values into the migration template
     sql = template.format(**params)
     conn.executescript(sql)
     conn.commit()
