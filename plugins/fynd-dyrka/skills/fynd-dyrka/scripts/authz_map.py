@@ -320,8 +320,8 @@ def main() -> int:
         return 0
 
     if not rows:
-        print("Точек входа не найдено (route.ts / Server Actions / api / express).")
-        print("Если это не веб-сервис — используй ручной инвентарь Шага 2.")
+        print("No entry points found (route.ts / Server Actions / api / express).")
+        print("If this is not a web service, use the manual Step 2 inventory.")
         return 0
 
     order = {"NO": 0, "unclear": 1, "yes": 2}
@@ -330,9 +330,9 @@ def main() -> int:
     unclear = sum(1 for r in rows if r["auth"] == "unclear")
     yes = sum(1 for r in rows if r["auth"] == "yes")
 
-    print(f"# AuthZ attack surface — {len(rows)} точек входа")
-    print(f"# auth виден: {yes}   неясно: {unclear}   НЕ виден: {no}")
-    print(f"# {'СМОТРЕТЬ ПЕРВЫМ: NO + sensitive' if no else 'auth виден везде'}")
+    print(f"# AuthZ attack surface — {len(rows)} entry points")
+    print(f"# auth visible: {yes}   unclear: {unclear}   NOT visible: {no}")
+    print(f"# {'LOOK HERE FIRST: NO + sensitive' if no else 'auth visible everywhere'}")
     print()
     print(f"{'auth':8} {'sens':5} {'endpoint':40} file")
     print("-" * 90)
@@ -341,10 +341,11 @@ def main() -> int:
         mark = "!" if r["sensitive"] else " "
         print(f"{r['auth']:8} {mark:^5} {r['endpoint'][:40]:40} {rel}")
     print()
-    print("Как читать: auth=NO — auth не виден в хендлере И в модуле → читать в")
-    print("первую очередь. unclear — auth есть в модуле, но не видно применения к")
-    print("этому хендлеру (мог быть в middleware) → проверить глазами. Это карта")
-    print("для Шага 3, не вердикт: скрипт не знает бизнес-логику.")
+    print("How to read this: auth=NO means auth is visible neither in the handler")
+    print("nor in the module -> read these first. unclear means the module has auth")
+    print("but it is not visibly applied to this handler (it may be in middleware)")
+    print("-> check by eye. This is a map for Step 3, not a verdict: the script does")
+    print("not know the business logic.")
     return 0
 
 
