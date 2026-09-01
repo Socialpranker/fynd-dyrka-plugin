@@ -525,7 +525,7 @@ def scan_gitleaks(target: str, timeout: int, raw_dir: str | None) -> ToolResult:
                         identifier=leak.get("RuleID", ""),
                         description=(
                             f"commit {str(leak.get('Commit', ''))[:12]} — "
-                            "секрет в истории: удаление файла его НЕ отзывает"
+                            "secret in history: deleting the file does NOT revoke it"
                         ),
                         tool="gitleaks",
                     )
@@ -887,20 +887,20 @@ _RECON_UA = "fynd-dyrka-recon/1.0"
 # Порты, опасные при экспозиции наружу (из passive_internet движка). Значение —
 # краткое описание риска для находки.
 _RISKY_PORTS = {
-    21: "FTP — часто анонимный / открытый текст",
-    23: "Telnet — открытый текст, устаревший",
-    135: "MS RPC — внутренний сервис наружу",
-    445: "SMB — внутренний сервис наружу (EternalBlue-класс)",
-    1433: "MSSQL — БД доступна из интернета",
-    1521: "Oracle DB — БД доступна из интернета",
-    3306: "MySQL — БД доступна из интернета",
-    3389: "RDP — удалённый рабочий стол наружу (брутфорс/CVE)",
-    5432: "PostgreSQL — БД доступна из интернета",
-    5984: "CouchDB — часто без auth",
-    6379: "Redis — по умолчанию без auth, RCE-класс",
-    9200: "Elasticsearch — часто без auth, утечка данных",
-    11211: "Memcached — без auth, amplification",
-    27017: "MongoDB — исторически без auth, утечка данных",
+    21: "FTP — often anonymous / cleartext",
+    23: "Telnet — cleartext, obsolete",
+    135: "MS RPC — internal service exposed",
+    445: "SMB — internal service exposed (EternalBlue class)",
+    1433: "MSSQL — database reachable from the internet",
+    1521: "Oracle DB — database reachable from the internet",
+    3306: "MySQL — database reachable from the internet",
+    3389: "RDP — remote desktop exposed (brute force / CVE)",
+    5432: "PostgreSQL — database reachable from the internet",
+    5984: "CouchDB — often unauthenticated",
+    6379: "Redis — unauthenticated by default, RCE class",
+    9200: "Elasticsearch — often unauthenticated, data leak",
+    11211: "Memcached — unauthenticated, amplification",
+    27017: "MongoDB — historically unauthenticated, data leak",
 }
 
 
@@ -952,10 +952,10 @@ def scan_git_exposure(url: str, timeout: int, raw_dir: str | None) -> ToolResult
     r = ToolResult(tool="git-exposure", layer="recon", status="ok")
     base = _base_url(url)
     probes = {
-        "/.git/HEAD": (b"ref: refs/", "рабочий git HEAD"),
-        "/.git/config": (b"[core]", "git config с секцией [core]"),
+        "/.git/HEAD": (b"ref: refs/", "a working git HEAD"),
+        "/.git/config": (b"[core]", "git config with a [core] section"),
         "/.git/index": (b"DIRC", "git index (magic DIRC)"),
-        "/.git/logs/HEAD": (b"", "reflog — история коммитов"),
+        "/.git/logs/HEAD": (b"", "reflog — commit history"),
     }
     hits: dict[str, tuple[str, str]] = {}  # path -> (severity, why)
     raw_lines = []
@@ -964,31 +964,31 @@ def scan_git_exposure(url: str, timeout: int, raw_dir: str | None) -> ToolResult
             status, _hdr, body = _http_get(base + path, timeout)
             raw_lines.append(f"{status} {path} ({len(body)}b)")
             if status == 403:
-                hits[path] = ("MEDIUM", f"403, но путь существует: {desc}")
+                hits[path] = ("MEDIUM", f"403, but the path exists: {desc}")
                 continue
             if status != 200 or not body:
                 continue
             head = body.lstrip()
             html = b"<html" in body[:200].lower() or b"<!doctype" in body[:200].lower()
             if sig and sig in body[:64]:
-                hits[path] = ("HIGH", f"200 + сигнатура: {desc}")
+                hits[path] = ("HIGH", f"200 + signature: {desc}")
             elif path == "/.git/logs/HEAD" and _re.match(rb"[0-9a-f]{40} ", head):
-                hits[path] = ("HIGH", f"200 + reflog-формат: {desc}")
+                hits[path] = ("HIGH", f"200 + reflog format: {desc}")
             elif not html:
-                hits[path] = ("LOW", f"200 без HTML, возможно {desc}")
-            # 200 + HTML без сигнатуры = catch-all 404, не находка
+                hits[path] = ("LOW", f"200 without HTML, possibly {desc}")
+            # 200 + HTML with no signature = catch-all 404, not a finding
         if hits:
-            # Одна находка с максимальной severity, а не 4 дубля.
+            # One finding at the highest severity, not four duplicates.
             best = max(hits.values(), key=lambda v: SEVERITY_RANK[v[0]])
             paths = ", ".join(sorted(hits))
             r.findings.append(
                 finding(
                     severity=best[0],
-                    title="Открытый .git на живом сервере",
+                    title="Exposed .git on the live server",
                     location=base + "/.git/",
                     identifier="git-exposure",
-                    description=f"{best[1]}. Отвечают: {paths}. "
-                    "Скачивание .git → исходники + секреты в истории коммитов.",
+                    description=f"{best[1]}. Responding: {paths}. "
+                    "Pulling .git yields sources plus secrets in commit history.",
                     tool="git-exposure",
                 )
             )
@@ -1009,10 +1009,10 @@ def scan_security_headers(url: str, timeout: int, raw_dir: str | None) -> ToolRe
             return r
         h = {k.lower(): v for k, v in hdr.items()}
         checks = [
-            ("strict-transport-security", "MEDIUM", "нет HSTS — downgrade на HTTP"),
-            ("content-security-policy", "MEDIUM", "нет CSP — XSS не смягчён"),
-            ("x-frame-options", "LOW", "нет X-Frame-Options — clickjacking"),
-            ("x-content-type-options", "LOW", "нет X-Content-Type-Options"),
+            ("strict-transport-security", "MEDIUM", "no HSTS — downgrade to HTTP"),
+            ("content-security-policy", "MEDIUM", "no CSP — XSS unmitigated"),
+            ("x-frame-options", "LOW", "no X-Frame-Options — clickjacking"),
+            ("x-content-type-options", "LOW", "no X-Content-Type-Options"),
         ]
         for name, sev, why in checks:
             if name not in h:
@@ -1035,11 +1035,11 @@ def scan_security_headers(url: str, timeout: int, raw_dir: str | None) -> ToolRe
             r.findings.append(
                 finding(
                     severity="HIGH",
-                    title="CORS отражает произвольный Origin с credentials",
+                    title="CORS reflects an arbitrary Origin with credentials",
                     location=base + "/",
                     identifier="cors-reflect-credentials",
-                    description="ACAO=<любой Origin> + ACAC=true → кража "
-                    "аутентифицированных ответов со стороннего сайта (T1539).",
+                    description="ACAO=<any Origin> + ACAC=true allows theft of "
+                    "authenticated responses from a third-party site (T1539).",
                     tool="security-headers",
                 )
             )
@@ -1047,11 +1047,11 @@ def scan_security_headers(url: str, timeout: int, raw_dir: str | None) -> ToolRe
             r.findings.append(
                 finding(
                     severity="MEDIUM",
-                    title="CORS wildcard с credentials",
+                    title="CORS wildcard with credentials",
                     location=base + "/",
                     identifier="cors-wildcard",
-                    description="ACAO=* + ACAC=true (браузер это блокирует, но "
-                    "сигнал слабой политики).",
+                    description="ACAO=* + ACAC=true (browsers block this, but it "
+                    "signals a weak policy).",
                     tool="security-headers",
                 )
             )
@@ -1123,12 +1123,12 @@ def scan_js_secrets(url: str, timeout: int, raw_dir: str | None) -> ToolResult:
                     r.findings.append(
                         finding(
                             severity="HIGH",
-                            title=f"Секрет в прод-JS: {name}",
+                            title=f"Secret in production JS: {name}",
                             location=ju,
                             identifier="js-secret",
-                            description=f"{name} = {_mask(val)} в клиентском "
-                            "бандле. Проверить scope ключа и живой ли он "
-                            "(whoami к провайдеру).",
+                            description=f"{name} = {_mask(val)} in the client "
+                            "bundle. Check the key's scope and whether it is live "
+                            "(a whoami call to the provider).",
                             tool="js-secrets",
                         )
                     )
@@ -1150,12 +1150,12 @@ def scan_shodan_internetdb(url: str, timeout: int, raw_dir: str | None) -> ToolR
     try:
         ip = socket.gethostbyname(host)
         if ipaddress.ip_address(ip).is_private:
-            r.status, r.reason = "skipped", f"{host} → приватный IP {ip}, пропуск"
+            r.status, r.reason = "skipped", f"{host} resolves to private IP {ip}, skipped"
             return r
         status, _hdr, body = _http_get(f"https://internetdb.shodan.io/{ip}", timeout)
         _dump_raw(raw_dir, "shodan-internetdb", body.decode("utf-8", "replace"))
         if status == 404:
-            r.reason = f"{ip}: нет данных в InternetDB (не индексирован)"
+            r.reason = f"{ip}: no data in InternetDB (not indexed)"
             return r
         if status != 200:
             r.status, r.reason = "error", f"InternetDB status {status}"
@@ -1168,7 +1168,7 @@ def scan_shodan_internetdb(url: str, timeout: int, raw_dir: str | None) -> ToolR
                 r.findings.append(
                     finding(
                         severity="MEDIUM",
-                        title=f"Опасный порт наружу: {p}",
+                        title=f"Risky port exposed: {p}",
                         location=f"{host} ({ip}):{p}",
                         identifier=f"port-{p}",
                         description=_RISKY_PORTS[p],
@@ -1178,22 +1178,22 @@ def scan_shodan_internetdb(url: str, timeout: int, raw_dir: str | None) -> ToolR
         for cve in cves:
             r.findings.append(
                 finding(
-                    severity="HIGH",  # уточнить по weaponized-списку в триаже
-                    title=f"Известная уязвимость на хосте: {cve}",
+                    severity="HIGH",  # refine against the weaponized list during triage
+                    title=f"Known vulnerability on the host: {cve}",
                     location=f"{host} ({ip})",
                     identifier=cve,
-                    description="Shodan видит этот хост уязвимым к "
-                    f"{cve}. Проверить достижимость и наличие public PoC "
-                    "(см. weaponized-CVE в SKILL.md Шаг 6).",
+                    description="Shodan reports this host as vulnerable to "
+                    f"{cve}. Check reachability and whether a public PoC exists "
+                    "(see weaponized CVEs in SKILL.md, Step 6).",
                     tool="shodan-internetdb",
                 )
             )
         if ports and not r.findings:
-            r.reason = f"порты {ports}, ни один не в списке рискованных"
+            r.reason = f"ports {ports}, none on the risky list"
     except socket.gaierror:
-        r.status, r.reason = "error", f"не резолвится: {host}"
+        r.status, r.reason = "error", f"does not resolve: {host}"
     except json.JSONDecodeError:
-        r.status, r.reason = "error", "InternetDB вернул не-JSON"
+        r.status, r.reason = "error", "InternetDB returned non-JSON"
     except Exception as e:  # noqa: BLE001
         r.status, r.reason = "error", str(e)[:300]
     return r
@@ -1210,7 +1210,7 @@ def scan_email_spoofability(url: str, timeout: int, raw_dir: str | None) -> Tool
         r.status, r.reason = "error", "no domain in url"
         return r
     if not have("dig"):
-        r.status, r.reason = "skipped", "dig not installed (нужен для DNS TXT)"
+        r.status, r.reason = "skipped", "dig not installed (required for DNS TXT)"
         return r
     try:
 
@@ -1244,30 +1244,30 @@ def scan_email_spoofability(url: str, timeout: int, raw_dir: str | None) -> Tool
         sev = None
         why = ""
         if spf == "missing" and dmarc == "missing":
-            sev, why = "CRITICAL", "нет ни SPF, ни DMARC — почта подделывается свободно"
+            sev, why = "CRITICAL", "neither SPF nor DMARC — mail is freely spoofable"
         elif spf in ("soft", "neutral", "missing") and dmarc in ("none", "missing"):
-            sev, why = "HIGH", f"слабый SPF ({spf}) + DMARC {dmarc}"
+            sev, why = "HIGH", f"weak SPF ({spf}) + DMARC {dmarc}"
         elif dmarc == "none" or pct_partial:
             sev, why = (
                 "MEDIUM",
                 f"SPF {spf}, DMARC p={dmarc}" + (" pct<100" if pct_partial else ""),
             )
         elif dmarc == "quarantine":
-            sev, why = "LOW", f"SPF {spf}, DMARC quarantine — почти строго"
+            sev, why = "LOW", f"SPF {spf}, DMARC quarantine — nearly strict"
         # p=reject + hard SPF → чисто, находки нет.
         if sev:
             r.findings.append(
                 finding(
                     severity=sev,
-                    title="Домен допускает подделку почты (SPF/DMARC)",
+                    title="Domain allows mail spoofing (SPF/DMARC)",
                     location=domain,
                     identifier="email-spoofability",
-                    description=f"{why}. BEC/фишинг «от компании» проходит.",
+                    description=f"{why}. BEC and phishing 'from the company' get through.",
                     tool="email-spoofability",
                 )
             )
         else:
-            r.reason = f"SPF {spf}, DMARC {dmarc} — конфигурация ок"
+            r.reason = f"SPF {spf}, DMARC {dmarc} — configuration is fine"
     except subprocess.TimeoutExpired:
         r.status, r.reason = "error", f"dig timeout after {timeout}s"
     except Exception as e:  # noqa: BLE001
@@ -1375,7 +1375,7 @@ def _local_env_secrets(target: str) -> dict[str, str]:
                             except ValueError:
                                 pwd = None
                             if pwd and len(pwd) >= 8:
-                                out[f"{k} (пароль)"] = pwd
+                                out[f"{k} (password)"] = pwd
         except OSError:
             continue
     return out
@@ -1413,7 +1413,7 @@ def scan_railway_exposure(target: str, timeout: int, raw_dir: str | None) -> Too
     if not have("railway"):
         return _platform_skip(
             "railway-exposure",
-            "railway CLI не найден. Установка: npm i -g @railway/cli && railway login",
+            "railway CLI not found. Install: npm i -g @railway/cli && railway login",
         )
 
     t0 = time.time()
@@ -1422,8 +1422,8 @@ def scan_railway_exposure(target: str, timeout: int, raw_dir: str | None) -> Too
         r.duration_s = round(time.time() - t0, 1)
         return _platform_skip(
             "railway-exposure",
-            "railway status не отработал: нет логина или проект не слинкован "
-            "(`railway login`, затем `railway link`)",
+            "railway status failed: not logged in, or the project is not linked "
+            "(`railway login`, then `railway link`)",
         )
 
     services = (
@@ -1460,15 +1460,15 @@ def scan_railway_exposure(target: str, timeout: int, raw_dir: str | None) -> Too
                 r.findings.append(
                     finding(
                         severity="HIGH",
-                        title=f"{kind} сервиса «{svc_name}» открыт в публичный интернет",
+                        title=f"{kind} of service '{svc_name}' is exposed to the public internet",
                         location=f"{tcp_domain}:{tcp_port} -> :{app_port}",
                         identifier="platform-datastore-exposed",
                         description=(
-                            f"TCP-прокси делает {kind} доступным с любого адреса. "
-                            "Хранилище должно быть доступно только приложению через "
-                            "приватную сеть провайдера. Прокси нужен лишь для "
-                            "локальной разработки — после деплоя приложения его "
-                            "следует снять."
+                            f"A TCP proxy makes {kind} reachable from any address. "
+                            "The data store should be reachable only by the "
+                            "application over the provider's private network. A "
+                            "proxy is needed only for local development and should "
+                            "be removed once the application is deployed."
                         ),
                         tool="railway-exposure",
                     )
@@ -1482,15 +1482,15 @@ def scan_railway_exposure(target: str, timeout: int, raw_dir: str | None) -> Too
                         finding(
                             severity="MEDIUM",
                             title=(
-                                f"HTTP-домен на сервисе-хранилище «{svc_name}» "
-                                "(вероятно, создан случайно)"
+                                f"HTTP domain on data-store service '{svc_name}' "
+                                "(probably created by accident)"
                             ),
                             location=str(public_domain),
                             identifier="platform-useless-domain",
                             description=(
-                                "База данных не обслуживает HTTP. Домен ничего не даёт, "
-                                "но добавляет публичную точку и попадает в сканеры "
-                                "и логи сертификатов (CT logs)."
+                                "A database does not serve HTTP. The domain achieves nothing "
+                                "but adds a public endpoint and shows up in scanners "
+                                "and certificate transparency logs."
                             ),
                             tool="railway-exposure",
                         )
@@ -1516,16 +1516,16 @@ def scan_railway_exposure(target: str, timeout: int, raw_dir: str | None) -> Too
                     finding(
                         severity="HIGH",
                         title=(
-                            f"Приложение ходит в БД под суперюзером «{user}» "
-                            f"(сервис «{svc_name}»)"
+                            f"The application connects to the database as superuser '{user}' "
+                            f"(service '{svc_name}')"
                         ),
                         location=f"{svc_name}:{key}",
                         identifier="platform-db-superuser",
                         description=(
-                            "Суперюзер может читать и менять всё, включая схему и "
-                            "другие базы. Приложению нужна отдельная роль с правами "
-                            "только на свои таблицы: тогда утёкшая строка подключения "
-                            "не отдаёт сервер целиком."
+                            "A superuser can read and change everything, including the "
+                            "schema and other databases. The application needs its "
+                            "own role limited to its own tables, so that a leaked "
+                            "connection string does not hand over the whole server."
                         ),
                         tool="railway-exposure",
                     )
@@ -1562,19 +1562,19 @@ def scan_railway_exposure(target: str, timeout: int, raw_dir: str | None) -> Too
                         finding(
                             severity="HIGH",
                             title=(
-                                f"Прод-секрет {var_name} совпадает с локальным "
+                                f"Production secret {var_name} matches the local "
                                 f"{local_key}"
                             ),
-                            location=f"{svc_name}:{var_name} == локальный .env:{local_key}",
+                            location=f"{svc_name}:{var_name} == local .env:{local_key}",
                             identifier="platform-secret-reuse",
                             description=(
-                                "Один и тот же секрет в проде и на машине разработчика: "
-                                "компрометация ноутбука (бэкап, скриншот, случайный "
-                                "`git add -f`, расшаренная папка) отдаёт прод. Нужны "
-                                "разные значения для dev и prod. Провайдер может "
-                                "дублировать этот же пароль в другие переменные — "
-                                "находка одна на значение. Значения секретов в отчёт "
-                                "не выводятся."
+                                "The same secret in production and on a developer machine: "
+                                "compromising the laptop (a backup, a screenshot, a "
+                                "stray `git add -f`, a shared folder) hands over "
+                                "production. dev and prod need different values. The "
+                                "provider may duplicate this password into other "
+                                "variables — one finding per value. Secret values are "
+                                "not printed in the report."
                             ),
                             tool="railway-exposure",
                         )
@@ -1595,13 +1595,14 @@ def scan_railway_exposure(target: str, timeout: int, raw_dir: str | None) -> Too
                 r.findings.append(
                     finding(
                         severity="MEDIUM",
-                        title=f"Строка подключения к БД «{svc_name}» без sslmode",
+                        title=f"Database connection string for '{svc_name}' has no sslmode",
                         location=f"{svc_name}:DATABASE_URL",
                         identifier="platform-db-no-tls",
                         description=(
-                            "Соединение идёт через публичную сеть, а режим TLS не задан "
-                            "явно — драйвер может согласовать открытый канал, и пароль "
-                            "с данными пойдут в открытом виде. Нужен `?sslmode=require`."
+                            "The connection crosses the public network with no explicit TLS "
+                            "mode — the driver may negotiate a cleartext channel, "
+                            "sending the password and data in the clear. Add "
+                            "`?sslmode=require`."
                         ),
                         tool="railway-exposure",
                     )
@@ -1613,12 +1614,12 @@ def scan_railway_exposure(target: str, timeout: int, raw_dir: str | None) -> Too
         r.findings.append(
             finding(
                 severity="MEDIUM",
-                title="В проекте одно окружение — нет изоляции prod от экспериментов",
+                title="Single environment in the project — production is not isolated from experiments",
                 location=f"environment: {environments[0]}",
                 identifier="platform-no-staging",
                 description=(
-                    "Любая проверка миграции или нового кода идёт по живым "
-                    "пользовательским данным, а откатывать нечем."
+                    "Any test of a migration or new code runs against live user "
+                    "data, with nothing to roll back to."
                 ),
                 tool="railway-exposure",
             )
@@ -1663,15 +1664,16 @@ def scan_deploy_config_drift(
         r.findings.append(
             finding(
                 severity="LOW",
-                title="Конфигурация деплоя отсутствует в репозитории",
+                title="Deploy configuration is absent from the repository",
                 location=target,
                 identifier="platform-config-undocumented",
                 description=(
-                    "Не найдено ни одного файла деплой-конфигурации или CI. Настройки "
-                    "прода существуют только на стороне провайдера: их не видно в "
-                    "code review, нельзя откатить вместе с кодом и невозможно "
-                    "восстановить при потере доступа к панели. Проверять такой прод "
-                    "приходится вручную через API — что и делает этот слой."
+                    "No deploy-configuration or CI file was found. Production "
+                    "settings exist only on the provider's side: they are invisible "
+                    "to code review, cannot be rolled back with the code, and cannot "
+                    "be restored if console access is lost. Such a production has to "
+                    "be inspected manually through the API — which is what this layer "
+                    "does."
                 ),
                 tool="deploy-config-drift",
             )

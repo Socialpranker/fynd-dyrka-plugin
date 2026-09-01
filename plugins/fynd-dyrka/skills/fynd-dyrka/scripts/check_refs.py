@@ -1,20 +1,21 @@
 #!/usr/bin/env python3
-"""Инвариант диеты SKILL.md: перенос не должен превращаться в потерю.
+"""Invariant for the SKILL.md diet: moving a section must not lose it.
 
-Секция, уехавшая в `references/`, полезна ровно до тех пор, пока SKILL.md
-посылает её читать. Файл, на который никто не ссылается, — это не экономия
-контекста, а вырезанный кусок инструкции: он есть на диске и недостижим.
+A section that moved into `references/` is useful exactly as long as SKILL.md
+still sends the reader to it. A file nobody references is not saved context — it
+is a cut-out piece of instruction: present on disk and unreachable.
 
-Проверяет три вещи:
-  1. каждый references/*.md упомянут в SKILL.md (иначе сирота);
-  2. каждая ссылка вида `references/x.md` из SKILL.md ведёт в существующий файл;
-  3. SKILL.md не вырос сверх бюджета.
+Checks three things:
+  1. every references/*.md is mentioned in SKILL.md (otherwise it is an orphan);
+  2. every `references/x.md` link in SKILL.md resolves to an existing file;
+  3. SKILL.md has not grown past its budget.
 
-Бюджет в БАЙТАХ, не в токенах: текст кириллический, отношение байт/токен
-плавает по моделям, а байты — то, что можно проверить без сети. 70 000 —
-потолок после диеты 27.08.2026 (было 85 814, стало 67 311).
+The budget is in BYTES, not tokens: the byte-per-token ratio drifts between
+models, while bytes are checkable without a network call. 70,000 is the ceiling
+set after the 2026-08-27 diet (85,814 → 67,311); the English translation later
+brought it to ~45,600.
 
-Запуск:  python3 scripts/check_refs.py [--ci]
+Run:  python3 scripts/check_refs.py [--ci]
 """
 import os, re, sys
 
@@ -32,25 +33,25 @@ def main() -> int:
     on_disk = sorted(f for f in os.listdir(REFS) if f.endswith(".md"))
     for name in on_disk:
         if name not in text:
-            issues.append("СИРОТА: references/%s ни разу не упомянут в SKILL.md" % name)
+            issues.append("ORPHAN: references/%s is never mentioned in SKILL.md" % name)
 
     for m in re.findall(r"references/([A-Za-z0-9_.-]+\.md)", text):
         if not os.path.exists(os.path.join(REFS, m)):
-            issues.append("БИТАЯ ССЫЛКА: SKILL.md → references/%s не существует" % m)
+            issues.append("BROKEN LINK: SKILL.md -> references/%s does not exist" % m)
 
-    print("SKILL.md: %d байт (бюджет %d)" % (size, BUDGET_BYTES))
-    print("references: %d файлов, все достижимы" % len(on_disk)
-          if not issues else "references: %d файлов" % len(on_disk))
+    print("SKILL.md: %d bytes (budget %d)" % (size, BUDGET_BYTES))
+    print("references: %d files, all reachable" % len(on_disk)
+          if not issues else "references: %d files" % len(on_disk))
     if size > BUDGET_BYTES:
-        issues.append("БЮДЖЕТ: SKILL.md %d > %d байт — переноси секцию в references,"
-                      " а не ужимай формулировки" % (size, BUDGET_BYTES))
+        issues.append("BUDGET: SKILL.md %d > %d bytes — move a section into"
+                      " references instead of compressing wording" % (size, BUDGET_BYTES))
 
     for i in issues:
-        print("  ✗ " + i)
+        print("  x " + i)
     if issues:
-        print("НЕ ПРОШЛО: %d" % len(issues))
+        print("FAILED: %d" % len(issues))
         return 1
-    print("✅ чисто")
+    print("OK: clean")
     return 0
 
 if __name__ == "__main__":

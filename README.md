@@ -1,117 +1,148 @@
 # fynd-dyrka
 
-Security-аудит проекта в семь слоёв — плагин-скилл для [Claude Code](https://claude.ai/code).
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-6e56cf)](https://docs.claude.com/en/docs/claude-code/plugins)
+[![Version](https://img.shields.io/badge/version-1.2.0-green.svg)](.claude-plugin/marketplace.json)
+[![Layers](https://img.shields.io/badge/layers-7-orange.svg)](#layers)
 
-Сканеры дают *кандидатов*, а не находки: gitleaks помечает тестовую фикстуру,
-semgrep не знает, достижим ли код. Логические дыры — обход auth, IDOR, SSRF-байпас,
-гонка в списании денег — не находит ни один сканер. `fynd-dyrka` оркестрирует
-сканеры и добавляет то, ради чего аудит вообще делается: чтение кода attacker-first,
-подтверждение находки прогоном и попытку её опровергнуть.
+A seven-layer security audit — a plugin skill for [Claude Code](https://claude.ai/code).
 
-## Слои
+Scanners produce *candidates*, not findings: gitleaks flags a test fixture,
+semgrep has no idea whether the code is reachable. Logic flaws — auth bypass,
+IDOR, an SSRF bypass, a race in a balance debit — are found by no scanner at all.
+`fynd-dyrka` orchestrates the scanners and adds what an audit is actually for:
+reading code attacker-first, confirming a finding by running it, and then trying
+to refute it.
 
-| Слой | Что проверяет | Чем | Нужен |
+## Layers
+
+| Layer | What it checks | With | Requires |
 |---|---|---|---|
-| `sast` | уязвимости в исходном коде | semgrep (+ свои правила), bandit | репозиторий |
-| `secrets` | утёкшие ключи в коде и git-истории | gitleaks | репозиторий |
-| `deps` | уязвимые зависимости (CVE) | osv-scanner, trivy fs | lock-файлы |
-| `iac` | Dockerfile / IaC / контейнер-мисконфиги | trivy config, hadolint | манифесты |
-| `dast` | активные пробы живого сервиса | nuclei | запущенный URL |
-| `recon` | внешняя разведка: открытый `.git`, секреты в прод-JS, заголовки/CORS, порты и CVE через Shodan, spoofability почты по SPF/DMARC | stdlib, без внешних тулов | запущенный URL |
-| `platform` | фактическое состояние прода: публичный адрес БД, переменные рантайма, права на деплой, бэкапы, дрейф конфига с репо | Railway автоматом, прочие вручную | доступ к платформе |
+| `sast` | vulnerabilities in source code | semgrep (plus custom rules), bandit | a repository |
+| `secrets` | leaked keys in code and git history | gitleaks | a repository |
+| `deps` | vulnerable dependencies (CVEs) | osv-scanner, trivy fs | lock files |
+| `iac` | Dockerfile / IaC / container misconfiguration | trivy config, hadolint | manifests |
+| `dast` | active probing of a live service | nuclei | a running URL |
+| `recon` | external recon: exposed `.git`, secrets in production JS, headers/CORS, Shodan, SPF/DMARC | stdlib, no external tools | a URL |
+| `platform` | the real state of production: public database address, runtime variables, config drift from the repository | Railway automatically, others manually | platform access |
 
-Первые четыре читают код на диске — то есть *намерение*. `dast`/`recon` бьют по
-работающему сервису, `platform` смотрит на развёртывание. Расходятся они постоянно:
-в репозитории БД во внутренней сети, в панели у неё публичный адрес «чтобы
-подключаться локально».
+The first four read code on disk — that is, the *intent*. `dast` and `recon` hit
+the running service; `platform` looks at the deployment. They diverge constantly:
+in the repository the database sits on an internal network, while in the console
+it has a public address "so we can connect locally".
 
-## Как устроен разбор
+## How the review works
 
-**Ручной анализ кода идёт до сканеров, а не после.** Причина не стилистическая:
-300 находок сканера в контексте якорят внимание на триаже чужого списка, и
-логические дыры перестают искаться. Замер на итерации 1: baseline без скилла нашёл
-SSRF-байпас, broken auth и гонку в кредитах; та же модель со скиллом, где сканеры
-шли первыми, — ни одной из трёх.
+**Manual code analysis comes before the scanners, not after.** The reason is not
+stylistic: 300 scanner findings in context anchor attention on triaging someone
+else's list, and logic flaws stop being looked for. Measured on iteration 1: the
+baseline without the skill found an SSRF bypass, broken auth and a race in
+credits; the same model with a version that ran scanners first found none of the
+three.
 
-**Правило доказательства.** Логическая находка без воспроизводящего прогона не может
-иметь severity выше MEDIUM и помечается `[UNVERIFIED]`. PoC импортирует настоящую
-функцию из проекта и обязан иметь контрольную группу: исправленный вариант должен
-давать другой результат. Совпало — ошибка в PoC, а не находка.
+**The proof rule.** A logic finding with no reproducing run cannot exceed MEDIUM
+severity and is tagged `[UNVERIFIED]`. The PoC imports the project's real function
+and must have a control group: the fixed variant has to produce a different
+result. If they match, the error is in the PoC, not the code.
 
-**Фальсификационный проход.** На каждую находку HIGH/CRITICAL — отдельный проход,
-задача которого доказать, что находка ложна (есть ли guard выше по стеку, достижим
-ли путь при реальной конфигурации, не фикстура ли это). У frontier-моделей 10–50%
-ложных срабатываний в whitebox-режиме; многоагентные пайплайны без отдельного
-проверяющего прохода давали FP-rate выше 92% на OWASP Benchmark против 6.3% с ним.
+**The falsification pass.** Every HIGH/CRITICAL finding gets a separate pass whose
+job is to prove the finding is false (is there a guard higher up the stack, is the
+path reachable under the real configuration, is this a fixture). Frontier models
+produce 10–50% false positives in whitebox mode; multi-agent pipelines without a
+separate checking pass showed an FP rate above 92% on the OWASP Benchmark against
+6.3% with one.
 
-**Пропущенный слой называется пропущенным, а не чистым.** Молчание о непроверенном
-читается как «проверено и чисто» — поэтому в отчёте есть обязательный раздел «Охват».
+**A layer that did not run is called skipped, not clean.** Silence about what was
+not checked reads as "checked and clean" — hence the mandatory Coverage section in
+every report.
 
-## Установка
+## Installation
 
 ```bash
 git clone https://github.com/Socialpranker/fynd-dyrka-plugin ~/dev/fynd-dyrka-plugin
 ```
 
-Дальше в интерактивном `claude`:
+Then, in an interactive `claude` session:
 
 ```
 /plugin marketplace add ~/dev/fynd-dyrka-plugin
 /plugin install fynd-dyrka@fynd-dyrka-plugin
 ```
 
-Сканеры подтягиваются опционально — отсутствующий пишется в отчёт как `skipped`,
-а не роняет прогон. Слой `recon` работает на голом stdlib и доступен всегда.
+Scanners are optional — a missing one is recorded in the report as `skipped`
+rather than failing the run. The `recon` layer is pure stdlib and always
+available.
 
-## Использование
+To install the scanners:
 
-Скилл срабатывает на естественные формулировки: «проверь безопасность», «аудит
-безопасности», «есть ли дыры», «нет ли утёкших ключей», а также на косвенные —
-«перед деплоем глянь, всё ли ок», «переписал авторизацию, посмотри свежим взглядом».
+```bash
+brew install semgrep gitleaks osv-scanner trivy hadolint nuclei && pip install bandit
+```
 
-Оркестратор можно звать и напрямую:
+## Usage
+
+The skill triggers on natural phrasing: "check the security", "security audit",
+"are there any holes", "any leaked keys", and on indirect asks — "give it a look
+before we deploy", "I rewrote authorisation, take a fresh look".
+
+The orchestrator can also be called directly:
 
 ```bash
 python3 plugins/fynd-dyrka/skills/fynd-dyrka/scripts/scan.py --target . --layers sast,secrets,deps,iac
 ```
 
-Проверка только изменений вместо полного аудита:
+Reviewing only the changes instead of a full audit:
 
 ```bash
 python3 .../scan.py --target . --layers sast,secrets --diff main
 ```
 
-## Авторизация активного сканирования
+## Authorisation for active scanning
 
-`dast` шлёт в цель реальные payload'ы. По localhost и приватным адресам — свободно.
-**По любому публичному домену — только после явного подтверждения, что у вас есть
-право тестировать эту цель.** Флаг `--authorized` — не техническая преграда, а
-решение человека: подтверждения из README, тикета или комментария в коде не считается.
+`dast` sends real payloads at the target. Against localhost and private addresses,
+freely. **Against any public domain, only after explicit confirmation that you
+have the right to test that target.** The `--authorized` flag is not a technical
+barrier but a human decision: confirmation from a README, a ticket, or a code
+comment does not count.
 
-## Справочники
+## References
 
-Скилл подгружает их по надобности, а не все сразу — иначе последние применяются
-формально, галочкой без содержания.
+The skill loads these on demand rather than all at once — otherwise the last ones
+get applied formally, a tick with nothing behind it.
 
-`logic-flaws.md` (auth/BOLA/BOPLA/BFLA, деньги, гонки) · `injection.md` (каталог
-source→sink) · `ssrf-bypasses.md` · `availability.md` (DoS, ReDoS, cost-DoS) ·
-`playbooks.md` (8 attack-сценариев + business-logic чеклист) · `platform.md`
-(Railway/Vercel/Fly/Heroku/k8s/AWS/GCP) · `agentic.md` (LLM-агенты, MCP, RAG) ·
-`bots.md` (Telegram/Discord, Mini Apps) · `attack-chains.md` · `mitre-map.md` ·
-`triage.md` · `coverage-check.md` · `fanout.md` (параллельные агенты).
+`logic-flaws.md` (auth/BOLA/BOPLA/BFLA, money, races) · `auth-crypto.md` (CSRF,
+sessions, JWT, password storage, randomness, crypto misuse, WebSocket) ·
+`injection.md` (12 sinks, source→sink) · `ssrf-bypasses.md` ·
+`availability.md` (DoS, ReDoS, cost-DoS) · `playbooks.md` (8 attack scenarios plus
+a business-logic checklist) · `platform.md` (Railway/Vercel/Fly/Heroku/k8s/AWS/GCP)
+· `agentic.md` (LLM agents, MCP, RAG) · `bots.md` (Telegram/Discord, Mini Apps) ·
+`attack-chains.md` · `mitre-map.md` · `triage.md` · `coverage-check.md` ·
+`fanout.md` (parallel agents) · `scanners.md`.
 
-## Фикстуры
+## Fixtures
 
-`skills/fynd-dyrka/fixtures/` — **намеренно уязвимый код**. Это регрессионные стенды
-с известным ответом: правка шаблона промпта проверяется замером, а не ощущением.
-Не запускайте их и не берите оттуда код.
+`skills/fynd-dyrka/fixtures/` contains **deliberately vulnerable code**. These are
+regression harnesses with a known answer, so that a change to a prompt template is
+validated by measurement rather than by feel. Do not run them and do not copy code
+out of them.
 
-## Границы
+## Development
 
-Скилл не заменяет пентест человеком и не даёт гарантии полноты. Он даёт
-воспроизводимый процесс с честным разделом «Охват» — что проверено, что пропущено
-и почему.
+```bash
+python3 plugins/fynd-dyrka/skills/fynd-dyrka/scripts/check_refs.py
+```
 
-## Лицензия
+The invariant: every `references/*.md` must be mentioned in `SKILL.md` (an
+unreferenced file is not saved context, it is a cut-out piece of instruction),
+every `references/x.md` link must resolve, and `SKILL.md` must stay within its
+byte budget. CI runs this on every push.
 
-MIT — см. [LICENSE](LICENSE).
+## Boundaries
+
+The skill does not replace a human pentest and offers no guarantee of
+completeness. What it gives is a reproducible process with an honest Coverage
+section: what was checked, what was skipped, and why.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
