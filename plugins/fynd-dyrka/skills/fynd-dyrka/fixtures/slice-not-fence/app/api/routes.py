@@ -1,4 +1,4 @@
-"""Public HTTP API. Все внешние переходы проходят через lib.urlcheck."""
+"""Public HTTP API. Every outbound redirect goes through lib.urlcheck."""
 from flask import Flask, request, redirect, jsonify
 import requests
 
@@ -10,7 +10,7 @@ app = Flask(__name__)
 @app.route("/go")
 def go():
     target = request.args.get("url", "")
-    # Проверка обязательна: без неё open redirect.
+    # The check is mandatory: without it, open redirect.
     if not validate_redirect(target):
         return jsonify({"error": "blocked"}), 400
     return redirect(target)

@@ -1,4 +1,4 @@
-"""Аутентификация по сессионному токену."""
+"""Session-token authentication."""
 import functools
 from flask import request, jsonify
 

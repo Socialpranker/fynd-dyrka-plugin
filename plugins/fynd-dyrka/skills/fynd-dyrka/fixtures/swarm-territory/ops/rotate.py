@@ -1,4 +1,4 @@
-"""Ротация сервисных ключей. Дёргается по расписанию."""
+"""Service key rotation. Triggered on a schedule."""
 import pickle
 import base64
 import os
@@ -7,7 +7,7 @@ STATE_FILE = "/var/lib/reports/rotation_state.b64"
 
 
 def load_state():
-    """Читает состояние ротации, сохранённое прошлым запуском."""
+    """Reads the rotation state saved by the previous run."""
     if not os.path.exists(STATE_FILE):
         return {}
     with open(STATE_FILE) as f:

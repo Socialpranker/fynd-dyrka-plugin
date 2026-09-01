@@ -72,7 +72,7 @@
 <div class="wrap">
   <header>
     <h1>Security Scan — {{TARGET}} <span class="grade" style="background:{{GRADE_COLOR}}">{{GRADE}}</span></h1>
-    <div class="meta">{{DATE}} · Слои: {{LAYERS}}</div>
+    <div class="meta">{{DATE}} · Layers: {{LAYERS}}</div>
   </header>
 
   <div class="summary">
@@ -84,22 +84,22 @@
 
   <p>{{EXECUTIVE_SUMMARY}}</p>
 
-  <h2>Критичное — чинить сейчас</h2>
+  <h2>Critical — fix now</h2>
   {{CRITICAL_FINDINGS}}
 
-  <h2>Цепочки атак</h2>
+  <h2>Attack chains</h2>
   {{ATTACK_CHAINS}}
 
-  <h2>Остальное</h2>
+  <h2>Everything else</h2>
   {{OTHER_FINDINGS}}
 
   <details>
-    <summary>Отсеяно как ложное / низкое ({{FILTERED_COUNT}})</summary>
+    <summary>Filtered out as false / low ({{FILTERED_COUNT}})</summary>
     {{FILTERED_FINDINGS}}
   </details>
 
   <details>
-    <summary>Что не проверено</summary>
+    <summary>What was not checked</summary>
     {{NOT_CHECKED}}
   </details>
 </div>

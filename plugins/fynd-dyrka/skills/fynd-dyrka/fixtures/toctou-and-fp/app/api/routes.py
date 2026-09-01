@@ -1,4 +1,4 @@
-"""Public HTTP API. Все внешние переходы проходят через lib.urlcheck."""
+"""Public HTTP API. Every outbound redirect goes through lib.urlcheck."""
 from flask import Flask, request, redirect, jsonify
 import requests
 
