@@ -77,13 +77,13 @@ VENDOR_DIRS = [
 
 
 def _gitleaks_config(path: str) -> str:
-    """Конфиг gitleaks, исключающий вендоренные каталоги.
+    """gitleaks config that excludes vendored directories.
 
-    ЗАЧЕМ: у `gitleaks dir` нет флага исключения путей — только allowlist в
-    конфиге. Без него слой не «шумит», а МОЛЧА НЕ РАБОТАЕТ: на дереве с 1 ГБ
-    node_modules прогон не укладывался в 300s и падал в timeout, то есть ни
-    одна утечка не возвращалась вообще. Замер на 13_inner-circle:
-    400s+ (timeout, 0 находок) → 3.3s и 6 реальных ключей.
+    WHY: `gitleaks dir` has no path-exclusion flag — only an allowlist in the
+    config. Without it the layer does not merely get noisy, it SILENTLY STOPS
+    WORKING: on a tree with 1 GB of node_modules the run did not fit in 300s and
+    died on timeout, so no leak was returned at all. Measured on a real project:
+    400s+ (timeout, 0 findings) -> 3.3s and 6 real keys.
     """
     escaped = [d.replace(".", r"\.") for d in VENDOR_DIRS if d != ".git"]
     paths = "\n".join(f"  '''(^|/){d}/'''," for d in escaped)
@@ -196,8 +196,8 @@ def run_cmd(
 # --------------------------------------------------------------------------- #
 
 
-# Кастомные semgrep-правила лежат в assets/ рядом со скиллом. Путь от этого
-# файла: scripts/scan.py -> ../assets/semgrep-rules.yml
+# The custom semgrep rules live in assets/ next to the skill. Path from this
+# file: scripts/scan.py -> ../assets/semgrep-rules.yml
 _CUSTOM_RULES = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "assets",
@@ -208,9 +208,10 @@ _CUSTOM_RULES = os.path.join(
 def _custom_semgrep_findings(
     target: str, timeout: int, raw_dir: str | None
 ) -> list[dict[str, Any]]:
-    """Второй проход semgrep с правилами fynd-dyrka. Возвращает список находок
-    (не ToolResult): они вливаются в общий semgrep-результат. Мягкая деградация:
-    нет файла правил / проход упал — пустой список, слой sast не страдает."""
+    """Second semgrep pass with fynd-dyrka rules. Returns a list of findings
+    (not a ToolResult): they merge into the overall semgrep result. Degrades
+    softly: no rules file or a failed pass yields an empty list, and the sast
+    layer is unaffected."""
     out: list[dict[str, Any]] = []
     if not os.path.exists(_CUSTOM_RULES):
         return out
@@ -251,7 +252,7 @@ def _custom_semgrep_findings(
                 )
             )
     except (subprocess.TimeoutExpired, json.JSONDecodeError):
-        return out  # проход не критичен — auto-результат уже собран
+        return out  # the pass is not critical — the auto result is already in
     except Exception:  # noqa: BLE001
         return out
     return out
@@ -299,12 +300,12 @@ def scan_semgrep(target: str, timeout: int, raw_dir: str | None) -> ToolResult:
                     tool="semgrep",
                 )
             )
-        # Второй проход: кастомные правила fynd-dyrka. Замер показал, что
-        # --config auto пропускает частые для Next.js/TS-стека классы (DOM XSS
-        # через dangerouslySetInnerHTML/innerHTML, NEXT_PUBLIC_ утечка секретов,
-        # SQL-конкатенация в route-хендлерах, $queryRawUnsafe). Эти правила их
-        # закрывают. Проход не обязателен: нет файла правил — auto-результат в
-        # силе, слой не падает.
+        # Second pass: fynd-dyrka custom rules. Measurement showed --config
+        # auto misses classes common to the Next.js/TS stack (DOM XSS through
+        # dangerouslySetInnerHTML/innerHTML, NEXT_PUBLIC_ secret leakage, SQL
+        # concatenation in route handlers, $queryRawUnsafe). These rules close
+        # them. The pass is optional: with no rules file the auto result stands
+        # and the layer does not fail.
         custom = _custom_semgrep_findings(target, timeout, raw_dir)
         r.findings.extend(custom)
         _errs = scanner_errors(data) if isinstance(locals().get("data"), dict) else []
@@ -377,13 +378,13 @@ def scan_bandit(target: str, timeout: int, raw_dir: str | None) -> ToolResult:
 
 
 def _nested_git_repos(target: str, max_depth: int = 3) -> list[str]:
-    """Git-репозитории внутри цели, когда сама цель репозиторием не является.
+    """Git repositories inside the target when the target itself is not one.
 
-    ЗАЧЕМ: типовая раскладка Ивана — папка проекта, а внутри неё собственно
-    репо (`13_inner-circle/inner-circle/.git`). Проверка `.git` только на
-    верхнем уровне объявляла такую цель «не репо» и пропускала всю историю:
-    секреты, удалённые из рабочего дерева, но оставшиеся в коммитах, не
-    находились, а слой при этом рапортовал `ok`.
+    WHY: a common layout is a project folder with the actual repository nested
+    inside it (`project/service/.git`). Checking for `.git` only at the top level
+    declared such a target "not a repo" and skipped the whole history: secrets
+    removed from the working tree but still present in commits went unfound,
+    while the layer reported `ok`.
     """
     found: list[str] = []
     base = target.rstrip("/").count("/")
@@ -394,7 +395,7 @@ def _nested_git_repos(target: str, max_depth: int = 3) -> list[str]:
         dirs[:] = [d for d in dirs if d not in VENDOR_DIRS]
         if ".git" in os.listdir(root) and os.path.isdir(os.path.join(root, ".git")):
             found.append(root)
-            dirs[:] = []  # вложенные суб-репозитории — забота их владельца
+            dirs[:] = []  # nested sub-repositories are their owner's concern
     return found
 
 
@@ -403,10 +404,10 @@ def scan_gitleaks(target: str, timeout: int, raw_dir: str | None) -> ToolResult:
     if not have("gitleaks"):
         r.reason = "gitleaks not installed (brew install gitleaks)"
         return r
-    # Битый путь обязан быть ошибкой, а не пустым результатом: gitleaks на
-    # несуществующей цели печатает FTL, но выходит с кодом 0 и не пишет отчёт —
-    # без этой проверки слой рапортует `ok, findings: 0`, что неотличимо от
-    # «секретов нет». Ровно тот молчаливый ноль, который скилл ищет у других.
+    # A broken path must be an error, not an empty result: on a non-existent
+    # target gitleaks prints FTL but exits 0 and writes no report — without this
+    # check the layer reports `ok, findings: 0`, indistinguishable from "no
+    # secrets". Exactly the silent zero the skill hunts for in other tools.
     if not os.path.exists(target):
         r.status, r.reason = "error", f"target does not exist: {target}"
         return r
@@ -416,9 +417,10 @@ def scan_gitleaks(target: str, timeout: int, raw_dir: str | None) -> ToolResult:
     )
     is_git = os.path.isdir(os.path.join(target, ".git"))
     # 'git' mode scans history; 'dir' mode scans the working tree (non-repos).
-    # ВАЖНО: dir-режим НЕ читает историю — секрет, удалённый последним коммитом,
-    # но живущий в предыдущих, в нём невидим. Поэтому для репозиториев нужны оба
-    # прогона, а не выбор одного (нередкий случай — репо лежит в подпапке цели).
+    # IMPORTANT: dir mode does NOT read history — a secret deleted in the last
+    # commit but alive in earlier ones is invisible to it. Repositories therefore
+    # need both runs, not a choice between them (a repo nested inside the target
+    # is not rare).
     mode = "git" if is_git else "dir"
     nested = [] if is_git else _nested_git_repos(target)
     cfg = _gitleaks_config(
@@ -450,7 +452,7 @@ def scan_gitleaks(target: str, timeout: int, raw_dir: str | None) -> ToolResult:
             with open(report_path) as f:
                 raw_text = f.read()
             leaks = json.loads(raw_text or "[]") or []
-        # gitleaks пишет отчёт в файл, а не в stdout — дампим содержимое файла.
+        # gitleaks writes its report to a file rather than stdout — dump the file.
         r.raw_available = _dump_raw(raw_dir, "gitleaks", raw_text)
         for leak in leaks:
             r.findings.append(
@@ -463,20 +465,20 @@ def scan_gitleaks(target: str, timeout: int, raw_dir: str | None) -> ToolResult:
                     tool="gitleaks",
                 )
             )
-        # `data` здесь не существует — gitleaks пишет в файл, не в stdout,
-        # поэтому scanner_errors() неприменим. Признак сбоя — ненулевой код
-        # возврата при --exit-code 0 (при нём находки НЕ дают ненулевой код,
-        # так что любой !=0 означает реальную ошибку, а не «нашлись секреты»).
+        # `data` does not exist here — gitleaks writes to a file, not stdout, so
+        # scanner_errors() does not apply. The failure signal is a non-zero exit
+        # code under --exit-code 0 (which makes findings NOT produce a non-zero
+        # code, so any !=0 means a real error rather than "secrets were found").
         if proc.returncode != 0:
             err = (proc.stderr or proc.stdout or "").strip()
             r.status, r.reason = "error", (err or f"exit {proc.returncode}")[:300]
         elif not os.path.exists(report_path):
-            # Молчаливый ноль: кода 0 мало, отчёта нет — значит не отработал.
+            # Silent zero: exit 0 is not enough — no report means it did not run.
             r.status, r.reason = "error", "gitleaks produced no report file"
         else:
             r.status = "ok"
 
-        # Второй прогон: история вложенных репозиториев (см. _nested_git_repos).
+        # Second run: history of nested repositories (see _nested_git_repos).
         seen = {(f["title"], f["location"]) for f in r.findings}
         for repo in nested:
             hist_name = f"gitleaks-git-{os.path.basename(repo)}.json"
@@ -744,9 +746,9 @@ def scan_hadolint(target: str, timeout: int, raw_dir: str | None) -> ToolResult:
         r.duration_s = round(time.time() - t0, 1)
         _dumped = _dump_raw(raw_dir, "hadolint", "\n".join(all_raw))
         r.raw_available = _dumped
-        # `data` здесь не существовало — ветка всегда была пустой, то есть
-        # проверки ошибок не было вовсе. hadolint: exit 1 = нашлись замечания
-        # (норма), exit >1 = сам инструмент сломался.
+        # `data` did not exist here — the branch was always empty, so there was
+        # no error checking at all. hadolint: exit 1 = findings (normal), exit >1
+        # = the tool itself broke.
         if proc.returncode > 1:
             err = (proc.stderr or "").strip()
             r.status, r.reason = "error", (err or f"exit {proc.returncode}")[:300]
@@ -817,7 +819,7 @@ def scan_nuclei(
             timeout=timeout,
         )
         r.duration_s = round(time.time() - t0, 1)
-        # nuclei тоже пишет в файл (JSONL), а не в stdout.
+        # nuclei also writes to a file (JSONL) rather than stdout.
         _raw_nuclei = ""
         if os.path.exists(out_path):
             with open(out_path) as f:
@@ -846,9 +848,10 @@ def scan_nuclei(
                             tool="nuclei",
                         )
                     )
-        # `data` здесь не существовало — проверки ошибок фактически не было.
-        # nuclei пишет JSONL в файл; отсутствие файла при коде 0 — сбой, а не
-        # «чисто»: иначе недоступный хост читается как «уязвимостей нет».
+        # `data` did not exist here — error checking was effectively absent.
+        # nuclei writes JSONL to a file; a missing file with exit code 0 is a
+        # failure, not "clean": otherwise an unreachable host reads as "no
+        # vulnerabilities".
         if proc.returncode != 0:
             err = (proc.stderr or "").strip()
             r.status, r.reason = "error", (err or f"exit {proc.returncode}")[:300]
@@ -869,13 +872,13 @@ def scan_nuclei(
 # Recon (passive/active probing of a live target — no external CLI tools)
 # --------------------------------------------------------------------------- #
 #
-# Этот слой закрывает поверхность, которой нет у SAST/secrets/deps: живой
-# сервис снаружи. Каждая проба — обычный HTTP/DNS-запрос средствами stdlib, без
-# внешних сканеров, поэтому слой работает на голой машине. Активные пробы
-# (git-exposure, js-secrets, headers) шлют реальные GET на цель и потому
-# подчиняются тому же авторизационному гейту, что nuclei: локальная цель —
-# свободно, публичная — только с --authorized. Пассивные пробы (shodan,
-# email-spoofability) бьют в сторонние сервисы/DNS, НЕ в цель, и гейта не требуют.
+# This layer covers surface that SAST/secrets/deps do not have: the live
+# service from outside. Every probe is an ordinary HTTP/DNS request through the
+# stdlib, with no external scanners, so the layer works on a bare machine. Active
+# probes (git-exposure, js-secrets, headers) send real GETs at the target and
+# therefore obey the same authorisation gate as nuclei: a local target is free, a
+# public one requires --authorized. Passive probes (shodan, email-spoofability)
+# hit third-party services and DNS, NOT the target, and need no gate.
 
 import re as _re  # noqa: E402
 import socket  # noqa: E402
@@ -884,8 +887,8 @@ import urllib.request  # noqa: E402
 
 _RECON_UA = "fynd-dyrka-recon/1.0"
 
-# Порты, опасные при экспозиции наружу (из passive_internet движка). Значение —
-# краткое описание риска для находки.
+# Ports that are dangerous when exposed (from the passive_internet engine). The
+# value is a short description of the risk for the finding.
 _RISKY_PORTS = {
     21: "FTP — often anonymous / cleartext",
     23: "Telnet — cleartext, obsolete",
@@ -907,11 +910,11 @@ _RISKY_PORTS = {
 def _http_get(
     url: str, timeout: int, max_bytes: int = 65536, origin: str | None = None
 ) -> tuple[int, dict, bytes]:
-    """GET без следования редиректам. Возвращает (status, headers, body[:max_bytes]).
+    """GET without following redirects. Returns (status, headers, body[:max_bytes]).
 
-    Редиректы НЕ следуются намеренно: во-первых, редирект сам по себе сигнал
-    (open redirect / приватная цель), во-вторых, слепое следование за Location —
-    это SSRF-педаль. status=-1 при сетевой ошибке.
+    Redirects are deliberately not followed: first, a redirect is itself a signal
+    (open redirect / a private destination); second, blindly following Location
+    is an SSRF pedal. status=-1 on a network error.
     """
 
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -927,7 +930,7 @@ def _http_get(
         resp = opener.open(req, timeout=timeout)
         return resp.status, dict(resp.headers), resp.read(max_bytes)
     except urllib.error.HTTPError as e:
-        # 3xx/4xx/5xx — валидный ответ для нас (403 на .git — сигнал, не ошибка).
+        # 3xx/4xx/5xx are valid answers here (403 on .git is a signal, not an error).
         try:
             body = e.read(max_bytes)
         except Exception:  # noqa: BLE001
@@ -943,11 +946,11 @@ def _base_url(url: str) -> str:
 
 
 def scan_git_exposure(url: str, timeout: int, raw_dir: str | None) -> ToolResult:
-    """Открытый .git на живом сервере — исходники и секреты из истории.
+    """An exposed .git on a live server — sources and secrets from history.
 
-    Классифицирует по СОДЕРЖИМОМУ, не по коду ответа: кастомная 404-страница
-    отдаёт 200 с HTML, а реальный `.git/config` — 200 с `[core]`. Различаем по
-    сигнатурам, иначе SPA с catch-all роутом даёт ложный «exposed».
+    Classifies by CONTENT rather than status code: a custom 404 page returns 200
+    with HTML, while a real `.git/config` returns 200 with `[core]`. We tell them
+    apart by signature, otherwise an SPA with a catch-all route reads as exposed.
     """
     r = ToolResult(tool="git-exposure", layer="recon", status="ok")
     base = _base_url(url)
@@ -999,7 +1002,7 @@ def scan_git_exposure(url: str, timeout: int, raw_dir: str | None) -> ToolResult
 
 
 def scan_security_headers(url: str, timeout: int, raw_dir: str | None) -> ToolResult:
-    """Отсутствие security-заголовков + отражающий CORS с credentials."""
+    """Missing security headers plus reflective CORS with credentials."""
     r = ToolResult(tool="security-headers", layer="recon", status="ok")
     base = _base_url(url)
     try:
@@ -1026,7 +1029,7 @@ def scan_security_headers(url: str, timeout: int, raw_dir: str | None) -> ToolRe
                         tool="security-headers",
                     )
                 )
-        # CORS: отражает ли произвольный Origin + credentials.
+        # CORS: does it reflect an arbitrary Origin together with credentials?
         _cs, chdr, _cb = _http_get(base + "/", timeout, origin="https://evil.example")
         ch = {k.lower(): v for k, v in chdr.items()}
         acao = ch.get("access-control-allow-origin", "")
@@ -1061,7 +1064,7 @@ def scan_security_headers(url: str, timeout: int, raw_dir: str | None) -> ToolRe
     return r
 
 
-# Паттерны секретов в клиентском JS. Значение маскируем, сырьё не храним.
+# Secret patterns in client-side JS. Values are masked; raw data is not stored.
 _JS_SECRET_PATTERNS = [
     ("AWS access key", _re.compile(r"AKIA[0-9A-Z]{16}")),
     ("Google API key", _re.compile(r"AIza[0-9A-Za-z\-_]{35}")),
@@ -1086,8 +1089,8 @@ def _mask(s: str) -> str:
 
 
 def scan_js_secrets(url: str, timeout: int, raw_dir: str | None) -> ToolResult:
-    """Секреты в прод-JS-бандлах. Другая поверхность, чем gitleaks по репо:
-    ключ мог не попасть в git, но уехать в собранный фронт."""
+    """Secrets in production JS bundles. A different surface from gitleaks over
+    the repo: a key may never enter git yet still ship in the built frontend."""
     r = ToolResult(tool="js-secrets", layer="recon", status="ok")
     base = _base_url(url)
     try:
@@ -1098,7 +1101,7 @@ def scan_js_secrets(url: str, timeout: int, raw_dir: str | None) -> ToolResult:
         html = body.decode("utf-8", "replace")
         srcs = _re.findall(r'src=["\']([^"\']+\.js[^"\']*)["\']', html)
         js_urls = []
-        for s in srcs[:20]:  # капа: не выкачиваем весь CDN
+        for s in srcs[:20]:  # cap: we do not download the entire CDN
             if s.startswith("http"):
                 js_urls.append(s)
             elif s.startswith("//"):
@@ -1139,9 +1142,9 @@ def scan_js_secrets(url: str, timeout: int, raw_dir: str | None) -> ToolResult:
 
 
 def scan_shodan_internetdb(url: str, timeout: int, raw_dir: str | None) -> ToolResult:
-    """Пассивная разведка через Shodan InternetDB — открытые порты + CVE по IP,
-    БЕЗ единого запроса к самой цели и без ключа. Запрос идёт к Shodan, не к
-    сервису пользователя, поэтому НЕ требует --authorized."""
+    """Passive recon through Shodan InternetDB — open ports and CVEs by IP,
+    with no request to the target itself and no API key. The request goes to
+    Shodan, not to the user's service, so it does NOT require --authorized."""
     r = ToolResult(tool="shodan-internetdb", layer="recon", status="ok")
     host = (urlparse(url).hostname or "").strip()
     if not host:
@@ -1200,11 +1203,11 @@ def scan_shodan_internetdb(url: str, timeout: int, raw_dir: str | None) -> ToolR
 
 
 def scan_email_spoofability(url: str, timeout: int, raw_dir: str | None) -> ToolResult:
-    """SPF/DMARC → риск подделки почты. Пассивно, только DNS TXT (через dig,
-    если есть, иначе пропуск с причиной). Запрос к DNS, не к цели — без гейта."""
+    """SPF/DMARC -> mail spoofing risk. Passive, DNS TXT only (through dig when
+    available, otherwise skipped with a reason). A DNS query, not a target hit."""
     r = ToolResult(tool="email-spoofability", layer="recon", status="ok")
     host = (urlparse(url).hostname or "").strip()
-    # зарегистрированный домен (два последних лейбла) — SPF/DMARC живут на нём
+    # the registered domain (last two labels) — SPF/DMARC live there
     domain = ".".join(host.split(".")[-2:]) if host.count(".") >= 1 else host
     if not domain:
         r.status, r.reason = "error", "no domain in url"
@@ -1240,7 +1243,7 @@ def scan_email_spoofability(url: str, timeout: int, raw_dir: str | None) -> Tool
             dmarc = m.group(1).lower() if m else "none"
             pm = _re.search(r"pct=(\d+)", dmarc_raw)
             pct_partial = bool(pm and int(pm.group(1)) < 100)
-        # Матрица риска (см. references/playbooks.md).
+        # Risk matrix (see references/playbooks.md).
         sev = None
         why = ""
         if spf == "missing" and dmarc == "missing":
@@ -1254,7 +1257,7 @@ def scan_email_spoofability(url: str, timeout: int, raw_dir: str | None) -> Tool
             )
         elif dmarc == "quarantine":
             sev, why = "LOW", f"SPF {spf}, DMARC quarantine — nearly strict"
-        # p=reject + hard SPF → чисто, находки нет.
+        # p=reject plus a hard SPF is clean, no finding.
         if sev:
             r.findings.append(
                 finding(
@@ -1276,28 +1279,28 @@ def scan_email_spoofability(url: str, timeout: int, raw_dir: str | None) -> Tool
 
 
 # --------------------------------------------------------------------------- #
-# Layer: platform — прод-конфигурация РАЗВЁРНУТОГО сервиса через CLI провайдера
+# Layer: platform — production configuration of the DEPLOYED service via the CLI
 #
-# ЗАЧЕМ ОТДЕЛЬНЫЙ СЛОЙ (замер 08.08.2026, проект CarDex): статические слои
-# прочитали 100% кода и дали 7 находок, из которых после триажа не выжила ни
-# одна значимая. Ручной разбор дал одну (replay initData). А самое тяжёлое —
-# прод-Postgres с суперюзерным доступом, открытый в интернет через TCP-прокси,
-# с паролем, совпадающим с локальным .env — не нашлось НИЧЕМ: в репозитории
-# нет ни одного файла с этими настройками (ни railway.json, ни CI). Класс
-# находки был вне поля зрения инструмента целиком.
+# WHY A SEPARATE LAYER (measurement 2026-08-08): the static layers read 100% of
+# the code and produced 7 findings, none of which survived triage as significant.
+# Manual review produced one (initData replay). The worst issue of all — a
+# production Postgres with superuser access, exposed to the internet through a TCP
+# proxy, with a password matching the local .env — was found by NOTHING: no file
+# in the repository carries those settings (no railway.json, no CI). The entire
+# class of finding was outside the tool's field of view.
 #
-# Отличие от слоя `iac`: тот читает Dockerfile/K8s/Terraform В РЕПО, то есть
-# декларацию намерения. Здесь мы спрашиваем провайдера о ФАКТИЧЕСКОМ состоянии
-# развёрнутого сервиса. Расхождение между ними — сама по себе находка.
+# The difference from the `iac` layer: that one reads Dockerfile/K8s/Terraform IN
+# THE REPOSITORY, that is, a declaration of intent. Here we ask the provider about
+# the ACTUAL state of the deployed service. A divergence is itself a finding.
 #
-# Авторизация: слой ходит через CLI провайдера (`railway`, `vercel`, `flyctl`),
-# который уже держит логин пользователя. Скилл не хранит и не запрашивает
-# токены. Нет CLI или нет логина → status="skipped" с командой установки, а не
-# падение и не молчаливый ноль.
+# Authorisation: the layer goes through the provider's CLI (`railway`, `vercel`,
+# `flyctl`), which already holds the user's login. The skill neither stores nor
+# requests tokens. No CLI or no login yields status="skipped" with the install
+# command, rather than a crash or a silent zero.
 # --------------------------------------------------------------------------- #
 
-# Порты, публичная доступность которых почти всегда означает ошибку
-# конфигурации: это внутренние хранилища, у них нет причин торчать в интернет.
+# Ports whose public availability almost always means a configuration mistake:
+# these are internal data stores with no reason to face the internet.
 _DATASTORE_PORTS = {
     5432: "PostgreSQL",
     3306: "MySQL/MariaDB",
@@ -1311,8 +1314,8 @@ _DATASTORE_PORTS = {
     2379: "etcd",
 }
 
-# Имена переменных, чьё значение — секрет. Сравниваем ЗНАЧЕНИЯ с локальным
-# .env, чтобы поймать «прод-пароль лежит на ноутбуке разработчика».
+# Variable names whose value is a secret. We compare VALUES against the local
+# .env to catch "the production password is sitting on a developer laptop".
 _SECRET_VAR_HINTS = (
     "PASSWORD",
     "SECRET",
@@ -1325,9 +1328,9 @@ _SECRET_VAR_HINTS = (
     "DSN",
 )
 
-# Роли БД, означающие полный контроль над сервером. Приложение должно ходить
-# под ограниченной ролью — компрометация connection string тогда не отдаёт
-# всё разом.
+# Database roles that mean full control of the server. The application should
+# connect under a restricted role, so that a compromised connection string does
+# not hand over everything at once.
 _SUPERUSER_ROLES = {"postgres", "root", "admin", "sa", "mysql", "sysdba"}
 
 
@@ -1336,10 +1339,10 @@ def _platform_skip(tool: str, reason: str) -> ToolResult:
 
 
 def _local_env_secrets(target: str) -> dict[str, str]:
-    """Значения секретов из локальных .env — для сверки с продом.
+    """Secret values from local .env files, for comparison against production.
 
-    Читаем ТОЛЬКО значения и держим их в памяти: они никогда не попадают ни в
-    findings, ни в raw-дамп. В отчёт уходит имя переменной и факт совпадения.
+    We read ONLY the values and keep them in memory: they never reach findings or
+    the raw dump. The report carries the variable name and the fact of a match.
     """
     out: dict[str, str] = {}
     for name in (".env", ".env.local", ".env.production", "backend/.env", "api/.env"):
@@ -1354,21 +1357,21 @@ def _local_env_secrets(target: str) -> dict[str, str]:
                         continue
                     k, _, v = line.partition("=")
                     k, v = k.strip(), v.strip().strip("'\"")
-                    # Плейсхолдеры вида REPLACE_ME/changeme — не секрет, и
-                    # совпадение по ним дало бы ложную тревогу на .env.example.
+                    # Placeholders such as REPLACE_ME/changeme are not secrets,
+                    # and matching on them would false-alarm on .env.example.
                     if len(v) < 8 or v.upper() in {"REPLACE_ME", "CHANGEME", "TODO"}:
                         continue
                     if any(h in k.upper() for h in _SECRET_VAR_HINTS):
                         out[k] = v
-                        # Пароль ВНУТРИ connection string — отдельно.
+                        # The password INSIDE a connection string, separately.
                         #
-                        # ЗАЧЕМ (замер 08.08.2026, CarDex): локальный
-                        # DATABASE_URL содержит публичный хост
-                        # (nozomi.proxy.rlwy.net:51319), а прод-переменная —
-                        # внутренний (postgres.railway.internal:5432). Пароль
-                        # один и тот же, но строки целиком не равны, и
-                        # сравнение по полному значению давало ЛОЖНЫЙ НОЛЬ:
-                        # проверка молчала ровно там, где обязана сработать.
+                        # WHY (measurement 2026-08-08): the local DATABASE_URL
+                        # holds a public host (proxy.example.net:51319) while the
+                        # production variable holds an internal one
+                        # (postgres.internal:5432). The password is identical but
+                        # the full strings differ, so comparing whole values gave
+                        # a FALSE ZERO: the check stayed silent exactly where it
+                        # was supposed to fire.
                         if "://" in v:
                             try:
                                 pwd = urlparse(v).password
@@ -1382,13 +1385,13 @@ def _local_env_secrets(target: str) -> dict[str, str]:
 
 
 def _railway_json(args: list[str], timeout: int, cwd: str | None = None) -> Any | None:
-    """railway CLI с --json. None, если команда не отработала.
+    """railway CLI with --json. None when the command did not run.
 
-    cwd обязателен по смыслу: railway определяет проект по .railway в ТЕКУЩЕЙ
-    директории. Без него слой читает не тот проект (или ни одного), причём
-    молча — `railway status` вне слинкованного каталога выходит с ошибкой, и
-    слой отдавал бы skipped на исправном окружении. Замер 08.08.2026: из
-    каталога проекта — 1 сервис, из /tmp — None.
+    cwd is meaningful and required: railway identifies the project from .railway in
+    the CURRENT directory. Without it the layer reads the wrong project (or none),
+    and silently — `railway status` outside a linked directory exits with an error,
+    so the layer would return skipped on a perfectly good environment. Measured
+    2026-08-08: from the project directory, 1 service; from /tmp, None.
     """
     try:
         proc = run_cmd(["railway", *args, "--json"], timeout=timeout, cwd=cwd)
@@ -1403,11 +1406,11 @@ def _railway_json(args: list[str], timeout: int, cwd: str | None = None) -> Any 
 
 
 def scan_railway_exposure(target: str, timeout: int, raw_dir: str | None) -> ToolResult:
-    """Публичная сетевая экспозиция сервисов Railway + привилегии и секреты.
+    """Public network exposure of Railway services, plus privileges and secrets.
 
-    Проверяет разом четыре вещи, потому что все они читаются из одного ответа
-    API и по отдельности неинформативны: открытый порт хранилища опасен ровно
-    настолько, насколько широки права учётки за ним.
+    It checks four things at once because all of them come from one API response
+    and are uninformative separately: an open data-store port is dangerous exactly
+    in proportion to how broad the credentials behind it are.
     """
     r = ToolResult(tool="railway-exposure", layer="platform", status="ok")
     if not have("railway"):
@@ -1441,7 +1444,7 @@ def scan_railway_exposure(target: str, timeout: int, raw_dir: str | None) -> Too
             or {}
         )
         if variables:
-            # Сырой дамп переменных НЕ пишем: это прод-секреты целиком.
+            # We do NOT write a raw dump of the variables: those are production secrets.
             raw_chunks.append(f"service {svc_name}: {len(variables)} variables")
 
         tcp_domain = variables.get("RAILWAY_TCP_PROXY_DOMAIN")
@@ -1449,7 +1452,7 @@ def scan_railway_exposure(target: str, timeout: int, raw_dir: str | None) -> Too
         app_port = variables.get("RAILWAY_TCP_APPLICATION_PORT")
         public_domain = variables.get("RAILWAY_PUBLIC_DOMAIN")
 
-        # 1. Хранилище с публичным TCP-прокси.
+        # 1. A data store with a public TCP proxy.
         if tcp_domain and app_port:
             try:
                 port_num = int(app_port)
@@ -1474,7 +1477,7 @@ def scan_railway_exposure(target: str, timeout: int, raw_dir: str | None) -> Too
                     )
                 )
 
-        # 2. HTTP-домен на сервисе-хранилище — бесполезен и расширяет поверхность.
+        # 2. An HTTP domain on a data-store service — useless and widens the surface.
         if public_domain and app_port:
             try:
                 if int(app_port) in _DATASTORE_PORTS:
@@ -1498,7 +1501,7 @@ def scan_railway_exposure(target: str, timeout: int, raw_dir: str | None) -> Too
             except (TypeError, ValueError):
                 pass
 
-        # 3. Суперюзер в connection string.
+        # 3. A superuser in the connection string.
         for key in ("DATABASE_URL", "PGUSER", "POSTGRES_USER", "MYSQL_USER"):
             val = variables.get(key)
             if not val:
@@ -1532,15 +1535,15 @@ def scan_railway_exposure(target: str, timeout: int, raw_dir: str | None) -> Too
                 )
                 break
 
-        # 4. Прод-секрет лежит в локальном .env.
+        # 4. A production secret present in the local .env.
         #
-        # Сравниваем и целое значение, и пароль внутри connection string:
-        # хост в dev и prod различается (публичный прокси против внутренней
-        # сети), поэтому строки целиком не совпадут даже при одном пароле.
+        # We compare both the whole value and the password inside a connection
+        # string: the host differs between dev and prod (a public proxy versus the
+        # internal network), so full strings will not match even on one password.
         #
-        # Дедуп по самому значению: провайдер раскладывает один пароль по
-        # нескольким переменным (DATABASE_URL, PGPASSWORD, POSTGRES_PASSWORD),
-        # и без этого один факт даёт три находки, раздувая severity-сводку.
+        # Deduplicate on the value itself: the provider spreads one password across
+        # several variables (DATABASE_URL, PGPASSWORD, POSTGRES_PASSWORD), and
+        # without this one fact yields three findings, inflating the severity table.
         reported_values: set[str] = set()
         for var_name, prod_val in variables.items():
             if not isinstance(prod_val, str) or len(prod_val) < 8:
@@ -1582,11 +1585,11 @@ def scan_railway_exposure(target: str, timeout: int, raw_dir: str | None) -> Too
                     matched = True
                     break
             if matched:
-                # Одна прод-переменная = максимум одна находка, иначе
-                # DATABASE_URL и его пароль дадут дубль об одном и том же.
+                # One production variable yields at most one finding, otherwise
+                # DATABASE_URL and its password duplicate the same fact.
                 continue
 
-        # 5. Соединение без TLS.
+        # 5. A connection without TLS.
         db_url = variables.get("DATABASE_URL", "")
         if isinstance(db_url, str) and db_url.startswith(
             ("postgres://", "postgresql://")
@@ -1608,7 +1611,7 @@ def scan_railway_exposure(target: str, timeout: int, raw_dir: str | None) -> Too
                     )
                 )
 
-    # 6. Единственное окружение — правки едут сразу в прод.
+    # 6. A single environment — changes go straight to production.
     environments = _railway_json(["environment"], timeout, cwd=target)
     if isinstance(environments, list) and len(environments) == 1:
         r.findings.append(
@@ -1633,12 +1636,12 @@ def scan_railway_exposure(target: str, timeout: int, raw_dir: str | None) -> Too
 def scan_deploy_config_drift(
     target: str, timeout: int, raw_dir: str | None
 ) -> ToolResult:
-    """Прод-конфигурация не описана в репозитории — её нельзя ни ревьюить, ни
-    воспроизвести.
+    """Production configuration is not described in the repository, so it can be
+    neither reviewed nor reproduced.
 
-    Это не «уязвимость» в словаре сканеров, но именно она делает все остальные
-    облачные находки невидимыми: если состояние прода живёт только в веб-панели,
-    никакой diff и никакой code review его не покажет.
+    This is not a "vulnerability" in scanner vocabulary, but it is what makes every
+    other cloud finding invisible: if production state lives only in a web console,
+    no diff and no code review will ever show it.
     """
     r = ToolResult(tool="deploy-config-drift", layer="platform", status="ok")
     t0 = time.time()
@@ -1698,10 +1701,10 @@ def _tmp(name: str) -> str:
 
 
 def _dump_raw(raw_dir: str | None, tool: str, content: str) -> bool:
-    """Сохранить сырой вывод сканера. Возвращает True, только если файл реально
-    записан — вызывающий обязан ставить raw_available по этому значению, а не по
-    одному факту, что raw_dir передан (иначе агент идёт читать несуществующий
-    файл при нехватке прав или места)."""
+    """Save a scanner's raw output. Returns True only when the file was actually
+    written — the caller must set raw_available from this value rather than from
+    the mere fact that raw_dir was passed (otherwise the agent goes off to read a
+    file that does not exist, on a permissions or disk-space failure)."""
     if not raw_dir or not content:
         return False
     try:
@@ -1713,17 +1716,18 @@ def _dump_raw(raw_dir: str | None, tool: str, content: str) -> bool:
 
 
 def scanner_errors(data: dict) -> list[str]:
-    """Вытащить ошибки, о которых сканер сообщает ВНУТРИ своего JSON.
+    """Extract errors a scanner reports INSIDE its own JSON.
 
-    ЗАЧЕМ (замер 05.08.2026): semgrep на несуществующем пути пишет
-    {"errors":[{"code":2,"message":"Invalid scanning root: ..."}]}, но выходит
-    с кодом 0 и пустым "results". Читая только "results", оркестратор ставил
-    status="ok" с нулём находок — то есть опечатка в --target выглядела как
-    «сервис чист по SAST». Молчаливый ноль опаснее падения: он неотличим от
-    чистого результата и обесценивает весь отчёт.
+    WHY (measurement 2026-08-05): semgrep on a non-existent path writes
+    {"errors":[{"code":2,"message":"Invalid scanning root: ..."}]} yet exits with
+    code 0 and an empty "results". Reading only "results", the orchestrator set
+    status="ok" with zero findings — that is, a typo in --target looked like "the
+    service is clean per SAST". A silent zero is more dangerous than a crash: it is
+    indistinguishable from a clean result and devalues the whole report.
 
-    Форматы различаются: semgrep/bandit дают список объектов с message/reason,
-    trivy — ошибку строкой. Берём всё, что похоже на текст ошибки."""
+    The formats differ: semgrep and bandit give a list of objects with
+    message/reason, while trivy gives an error string. We take anything that looks
+    like error text."""
     out: list[str] = []
     raw = data.get("errors") or []
     if isinstance(raw, str):
@@ -1744,19 +1748,19 @@ def scanner_errors(data: dict) -> list[str]:
 
 
 def changed_files(target: str, ref: str) -> tuple[list[str], str]:
-    """Файлы, изменённые относительно ref, для инкрементального прогона.
+    """Files changed relative to a ref, for an incremental run.
 
-    ЗАЧЕМ: типовой запрос — «переписал auth, проверь» — не требует полного
-    скана репозитория. Полный прогон на большом дереве съедает таймаут и
-    возвращает те же сотни старых находок, среди которых новую не видно.
+    WHY: the standard request — "I rewrote auth, check it" — does not require a
+    full repository scan. A full run on a large tree eats the timeout and returns
+    the same hundreds of old findings, among which the new one is invisible.
 
-    Возвращает (список абсолютных путей, причина-пустоты). Пустой список с
-    непустой причиной означает «сузить не удалось» — вызывающий обязан
-    откатиться на полный скан, а не молча просканировать ничего: тихий ноль
-    файлов неотличим от «чисто», а это худший исход.
+    Returns (list of absolute paths, reason-for-emptiness). An empty list with a
+    non-empty reason means "narrowing failed" — the caller must fall back to a full
+    scan rather than silently scan nothing: a quiet zero files is indistinguishable
+    from "clean", which is the worst outcome.
 
-    Учитываются и staged, и unstaged, и untracked изменения — иначе только что
-    написанный файл, ещё не добавленный в индекс, выпадет из проверки.
+    Staged, unstaged and untracked changes all count — otherwise a file just
+    written and not yet added to the index falls out of the check.
     """
     if not os.path.isdir(os.path.join(target, ".git")):
         found = run_cmd(
@@ -1765,8 +1769,8 @@ def changed_files(target: str, ref: str) -> tuple[list[str], str]:
         if found.returncode != 0:
             return [], "not a git repository"
     try:
-        # Несуществующий ref обязан отличаться от «изменений нет»: иначе опечатка
-        # в имени ветки читается как «всё чисто с прошлого релиза».
+        # A non-existent ref must differ from "no changes": otherwise a typo in a
+        # branch name reads as "all clean since the last release".
         probe = run_cmd(
             [
                 "git",
@@ -1805,7 +1809,7 @@ def changed_files(target: str, ref: str) -> tuple[list[str], str]:
         for n in sorted(names):
             full = os.path.join(target, n)
             if not os.path.isfile(full):
-                continue  # удалённые файлы сканировать нечем
+                continue  # deleted files have nothing to scan
             if any(f"/{d}/" in f"/{n}/" for d in VENDOR_DIRS):
                 continue
             paths.append(full)
@@ -1853,15 +1857,15 @@ SECRETS_SCANNERS: list[Callable] = [scan_gitleaks]
 DEPS_SCANNERS: list[Callable] = [scan_osv, scan_trivy_fs]
 IAC_SCANNERS: list[Callable] = [scan_trivy_config, scan_hadolint]
 
-# Platform: фактическое состояние РАЗВЁРНУТОГО сервиса через CLI провайдера.
-# Читает конфигурацию, ничего не меняет. Гейта --authorized не требует: CLI
-# работает под уже выполненным логином пользователя, то есть в его собственной
-# инфраструктуре, а не по произвольной чужой цели.
+# Platform: the actual state of the DEPLOYED service through the provider CLI.
+# Reads configuration and changes nothing. Needs no --authorized gate: the CLI
+# works under the user's existing login, that is, inside their own
+# infrastructure rather than against an arbitrary third-party target.
 PLATFORM_SCANNERS: list[Callable] = [scan_railway_exposure, scan_deploy_config_drift]
 
-# Recon: активные пробы бьют по цели (гейт --authorized как у nuclei),
-# пассивные бьют по сторонним сервисам/DNS (без гейта). Каждая — (url, timeout,
-# raw_dir) -> ToolResult, как остальные сканеры.
+# Recon: active probes hit the target (the same --authorized gate as nuclei),
+# passive ones hit third-party services and DNS (no gate). Each is
+# (url, timeout, raw_dir) -> ToolResult, like the other scanners.
 RECON_ACTIVE_SCANNERS: list[Callable] = [
     scan_git_exposure,
     scan_security_headers,
@@ -1936,21 +1940,21 @@ def main() -> int:
         report.notes.append("recon layer requested but no --url given; skipped")
         layers = [ly for ly in layers if ly != "recon"]
 
-    # Инкрементальный режим: sast/secrets гоняем по дереву-срезу из изменённых
-    # файлов. deps/iac/dast остаются полными — lock-файл, Dockerfile и живой
-    # сервис имеет смысл проверять только целиком.
-    #
-    # Срез собираем копией во временную директорию, а не списком путей: так
-    # работает любой сканер без переписывания каждого под приём N путей.
-    # Копия, а не симлинки — часть сканеров не ходит по ссылкам и вернула бы
-    # тихий ноль находок.
+    # Incremental mode: sast/secrets run over a slice tree of changed files.
+    # deps/iac/dast stay full — a lock file, a Dockerfile and a live service are
+    # only meaningful checked whole.
+
+    # The slice is assembled as a copy in a temporary directory rather than a list
+    # of paths: that way any scanner works without rewriting each one to accept N
+    # paths. A copy rather than symlinks — some scanners do not follow links and
+    # would return a quiet zero findings.
     narrowed_target = target
     diff_tmp: str | None = None
     if args.diff:
         files, why = changed_files(target, args.diff)
         if not files:
-            # Сузить не вышло — честно откатываемся на полный скан и говорим
-            # об этом. Просканировать пустоту и отрапортовать "чисто" нельзя.
+            # Narrowing failed — fall back honestly to a full scan and say so.
+            # Scanning nothing and reporting "clean" is not acceptable.
             report.notes.append(
                 f"--diff {args.diff}: {why}; fell back to full scan of {target}"
             )
@@ -1996,9 +2000,9 @@ def main() -> int:
             for fn in IAC_SCANNERS:
                 report.tools.append(fn(target, args.timeout, args.raw_dir))
         elif layer == "platform":
-            # Полный target, не срез: прод-конфигурация не имеет отношения к
-            # набору изменённых файлов, а локальный .env для сверки секретов
-            # в --diff-снапшот не попадает.
+            # Full target, not the slice: production configuration has nothing to
+            # do with the set of changed files, and the local .env used for secret
+            # comparison is not part of the --diff snapshot.
             for fn in PLATFORM_SCANNERS:
                 report.tools.append(fn(target, args.timeout, args.raw_dir))
         elif layer == "dast":
@@ -2006,10 +2010,10 @@ def main() -> int:
                 scan_nuclei(args.url, args.timeout, args.authorized, args.raw_dir)
             )
         elif layer == "recon":
-            # Пассивные пробы — всегда (бьют по Shodan/DNS, не по цели).
+            # Passive probes always run (they hit Shodan/DNS, not the target).
             for fn in RECON_PASSIVE_SCANNERS:
                 report.tools.append(fn(args.url, args.timeout, args.raw_dir))
-            # Активные пробы — под тем же гейтом, что nuclei.
+            # Active probes sit behind the same gate as nuclei.
             local = is_local_target(args.url)
             if local or args.authorized:
                 for fn in RECON_ACTIVE_SCANNERS:
@@ -2044,9 +2048,9 @@ def main() -> int:
         t.findings.sort(key=lambda f: SEVERITY_RANK.get(f["severity"], 0), reverse=True)
 
     if diff_tmp:
-        # Переписываем пути обратно на настоящие: сканеры видели снапшот во
-        # временной директории, а пользователю нужен путь, который открывается
-        # в его репозитории. Без этого находка формально верна, но бесполезна.
+        # Rewrite paths back to the real ones: the scanners saw a snapshot in a
+        # temporary directory, while the user needs a path that opens in their
+        # repository. Without this the finding is formally correct but useless.
         for t in report.tools:
             for f in t.findings:
                 if diff_tmp in f.get("location", ""):

@@ -1,30 +1,32 @@
 #!/usr/bin/env python3
 """
-authz_map — картограф attack surface для аудита авторизации.
+authz_map — an attack-surface cartographer for authorisation audits.
 
-НЕ сканер уязвимостей. Строит инвентарь точек входа (роуты, Server Actions,
-API-хендлеры) и по каждой отвечает на ОДИН вопрос: виден ли рядом вызов
-аутентификации/авторизации? Выход — таблица, которая служит ВХОДОМ в ручной
-разбор (Шаг 3 скилла), а не заменой ему: скрипт не решает, что дыра, он
-подсвечивает места, где auth не виден и которые стоит прочитать глазами.
+NOT a vulnerability scanner. It builds an inventory of entry points (routes,
+Server Actions, API handlers) and answers ONE question about each: is an
+authentication or authorisation call visible nearby? The output is a table that
+serves as the ENTRY POINT into manual review (Step 3 of the skill), not a
+replacement for it: the script does not decide what is a hole, it highlights
+places where auth is not visible and that are worth reading by eye.
 
-Почему это ценно: на большом репо ручная инвентаризация Шага 2 съедает контекст
-до начала анализа. Скрипт механизирует её — грепает точки входа и группирует по
-«auth виден / не виден / неясно», чтобы разбор сразу шёл по подсвеченным.
+Why this is valuable: on a large repository the manual Step 2 inventory eats the
+context before analysis begins. The script mechanises it — it greps entry points
+and groups them by "auth visible / not visible / unclear", so the review starts
+from the highlighted ones.
 
-Три исхода по каждому эндпоинту:
-  yes     — вызов auth найден в теле хендлера;
-  unclear — auth-механизм есть в модуле (импорт/middleware), но не видно, что он
-            применён именно к этому хендлеру → прочитать глазами;
-  NO      — ни в теле, ни в модуле auth не найдено → приоритет для разбора.
+Three outcomes per endpoint:
+  yes     — an auth call was found in the handler body;
+  unclear — an auth mechanism exists in the module (import/middleware) but it is
+            not visibly applied to this handler -> read it by eye;
+  NO      — no auth found in the body or the module -> priority for review.
 
-Честность про ложные негативы: auth может жить в middleware (Next.js
-middleware.ts), в декораторе, в общей обёртке. Поэтому «NO» означает «не виден
-здесь», а не «его точно нет». Скрипт для этого и нужен — сузить, что читать.
+Honesty about false negatives: auth may live in middleware (Next.js
+middleware.ts), in a decorator, or in a shared wrapper. So "NO" means "not
+visible here", not "definitely absent". Narrowing what to read is the point.
 
 Usage:
-  authz_map.py --target .            # текстовая таблица
-  authz_map.py --target . --json     # JSON для machine-обработки
+  authz_map.py --target .            # text table
+  authz_map.py --target . --json     # JSON for machine processing
 """
 
 from __future__ import annotations
@@ -51,8 +53,8 @@ VENDOR_DIRS = {
     "coverage",
 }
 
-# Сигнатуры вызова auth/authz. Намеренно широкие — лучше пометить «unclear»,
-# чем пропустить защищённый эндпоинт как «NO».
+# Auth/authz call signatures. Deliberately broad — better to mark something
+# "unclear" than to miss a protected endpoint as "NO".
 AUTH_SIGNATURES = [
     r"\bauth\s*\(",  # auth() — next-auth v5
     r"getServerSession",  # next-auth v4
@@ -76,16 +78,16 @@ AUTH_SIGNATURES = [
     r"\bsession\??\.user\b",
     r"@login_required",
     r"@requires_auth",
-    r"@jwt_required",  # python-декораторы
+    r"@jwt_required",  # Python decorators
     r"clerkClient",
     r"auth\.protect",
     r"withApiAuth",
-    # Заголовочная / секретная auth машинных вызовов (internal / cron / webhook).
-    # Без них картограф ложно метил защищённые internal-роуты как NO: реальный
-    # инцидент на 10_FYND_DYRKA — scan-update с x-internal-token + timingSafeEqual
-    # уходил в NO, потому что «сессионных» сигнатур в нём нет.
-    r"timingSafeEqual",  # постоянное сравнение секрета — почти всегда auth
-    r"compare_digest",  # python-аналог
+    # Header/secret auth for machine callers (internal / cron / webhook).
+    # Without these the cartographer falsely marked protected internal routes as
+    # NO: a real incident had a scan-update route with x-internal-token plus
+    # timingSafeEqual land in NO, because it carries no session-style signature.
+    r"timingSafeEqual",  # constant-time secret comparison — almost always auth
+    r"compare_digest",  # the Python equivalent
     r"x-internal-token",
     r"x-internal",
     r"x-api-key",
@@ -110,18 +112,18 @@ AUTH_SIGNATURES = [
 ]
 _AUTH_RE = re.compile("|".join(AUTH_SIGNATURES), re.IGNORECASE)
 
-# Admin/чувствительность по имени эндпоинта — для приоритизации в выводе.
+# Admin/sensitivity by endpoint name — used to prioritise the output.
 _SENSITIVE_RE = re.compile(
     r"/(admin|manage|internal|delete|remove|billing|payment|pay|credit|"
     r"role|permission|user|account|settings|config)\b",
     re.I,
 )
 
-# HTTP-методы Next.js route handler.
+# Next.js route handler HTTP methods.
 _NEXT_HANDLER_RE = re.compile(
     r"export\s+(?:async\s+)?function\s+(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b"
 )
-# Express/Fastify/Koa-роуты.
+# Express/Fastify/Koa routes.
 _EXPRESS_RE = re.compile(
     r"\b(?:app|router|server|fastify)\s*\.\s*(get|post|put|patch|delete|all)\s*\(\s*"
     r"[`'\"]([^`'\"]+)[`'\"]"
@@ -137,10 +139,10 @@ def _walk_files(target: str):
 
 
 def _route_path_from_next_file(path: str, target: str) -> str:
-    """Из пути файла Next.js App Router собрать URL-подобный маршрут.
+    """Build a URL-like route from a Next.js App Router file path.
 
-    app/api/admin/route.ts -> /api/admin ; группы (marketing) и приватные
-    _folders в URL не входят — как в Next.js.
+    app/api/admin/route.ts -> /api/admin ; groups (marketing) and private
+    _folders are excluded from the URL, as in Next.js.
     """
     rel = os.path.relpath(path, target)
     parts = rel.split(os.sep)
@@ -153,13 +155,14 @@ def _route_path_from_next_file(path: str, target: str) -> str:
     return "/" + "/".join(parts) if parts else "/"
 
 
-# Грубо убрать // и /* */ комментарии перед поиском auth-сигнатур. Без этого
-# комментарий вида «намеренно без auth()» ложно матчит картограф — инцидент:
-# фикс rate-limit на demo/route.ts добавил именно такой комментарий и сам себя
-# обманул (все NO пропали, включая настоящие). Грубость приемлема: это фильтр
-# ПЕРЕД regex-поиском сигнатуры, не парсер языка — ложноположительный "//"
-# внутри строкового литера (редкость в auth-related коде) на исход не влияет,
-# а не почистить комментарии хуже: там живут false positives каждый день.
+# Crudely strip // and /* */ comments before searching for auth signatures.
+# Without this a comment such as "deliberately without auth()" falsely matches —
+# a real incident: a rate-limit fix on demo/route.ts added exactly such a comment
+# and fooled the cartographer (every NO disappeared, including the real ones).
+# The crudeness is acceptable: this is a filter BEFORE the signature regex, not a
+# language parser — a false "//" inside a string literal (rare in auth-related
+# code) does not change the outcome, while not stripping comments is worse,
+# because false positives live there every day.
 _LINE_COMMENT_RE = re.compile(r"//.*$", re.MULTILINE)
 _BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
 _PY_COMMENT_RE = re.compile(r"#.*$", re.MULTILINE)
@@ -177,9 +180,9 @@ def _has_auth_in(text: str) -> bool:
 
 
 def _slice_function_body(text: str, start_idx: int) -> str:
-    """Грубо вырезать тело функции от start_idx по балансу фигурных скобок.
-    Без парсера — достаточно, чтобы отличить «auth в этом хендлере» от «auth
-    где-то в файле»."""
+    """Crudely cut out a function body from start_idx by brace balance.
+    No parser needed — enough to tell "auth in this handler" from "auth somewhere
+    in the file"."""
     brace = text.find("{", start_idx)
     if brace == -1:
         return text[start_idx : start_idx + 400]
@@ -206,7 +209,7 @@ def analyze(target: str) -> list[dict]:
         is_server_action = '"use server"' in text or "'use server'" in text
         base = os.path.basename(path)
 
-        # 1) Next.js App Router: route.ts с export-хендлерами
+        # 1) Next.js App Router: route.ts with exported handlers
         if base.startswith("route.") and base.endswith((".ts", ".tsx", ".js")):
             route = _route_path_from_next_file(path, target)
             for m in _NEXT_HANDLER_RE.finditer(text):
@@ -223,7 +226,7 @@ def analyze(target: str) -> list[dict]:
                     )
                 )
 
-        # 2) Server Actions: export async function в файле с "use server"
+        # 2) Server Actions: export async function in a file with "use server"
         if is_server_action:
             for m in re.finditer(
                 r"export\s+(?:async\s+)?function\s+([A-Za-z0-9_]+)", text
@@ -278,7 +281,7 @@ def analyze(target: str) -> list[dict]:
                 )
             )
 
-    # дедуп по (endpoint, файл)
+    # deduplicate by (endpoint, file)
     seen = set()
     uniq = []
     for r in rows:

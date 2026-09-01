@@ -1,8 +1,10 @@
 {
   "name": "fynd-dyrka",
-  "description": "Проверка безопасности в семь слоёв: SAST, секреты, зависимости, IaC, DAST, внешняя recon-разведка живого сервиса (открытый .git, секреты в прод-JS, security-заголовки/CORS, открытые порты и CVE через Shodan, spoofability почты по SPF/DMARC) и platform — реальное состояние прод-развёртывания (публичный адрес БД, переменные рантайма, права на деплой, бэкапы, дрейф конфига с репозиторием). Оркестрирует semgrep/gitleaks/osv-scanner/trivy/nuclei и делает то, чего сканеры не умеют: разбор кода на логические дыры (обход auth, IDOR, SSRF, гонки в деньгах) с подтверждением запуском, отдельный разбор доступности и стоимости (нет rate-limit, unbounded-запросы, ReDoS, cost-DoS на платных API) и наблюдаемости (останется ли след после инцидента), MITRE-маппинг находок и построение цепочек атак. Отдельно покрывает агентную поверхность (LLM-агенты, MCP-серверы, RAG): избыточные полномочия, tool poisoning, изоляция памяти, prompt injection. Каждую находку HIGH/CRITICAL проводит через попытку опровержения, а не только подтверждения.",
-  "version": "1.1.0",
+  "description": "Security review in seven layers: SAST, secrets, dependencies, IaC, DAST, external recon of a live service (exposed .git, secrets in production JS, security headers/CORS, open ports and CVEs via Shodan, mail spoofability via SPF/DMARC), and platform — the real state of the production deployment (public database address, runtime variables, deploy permissions, backups, config drift from the repository). Orchestrates semgrep/gitleaks/osv-scanner/trivy/nuclei and does what scanners cannot: reading code for logic flaws (auth bypass, IDOR, SSRF, races over money) confirmed by running them, a separate pass on availability and cost (missing rate limits, unbounded queries, ReDoS, cost-DoS on paid APIs) and on observability (will an incident leave a trace), MITRE mapping and attack-chain construction. It also covers the agentic surface (LLM agents, MCP servers, RAG): excessive agency, tool poisoning, memory isolation, prompt injection. Every HIGH/CRITICAL finding is put through an attempt to refute it, not only to confirm it.",
+  "version": "1.2.0",
   "author": {
     "name": "Socialpranker"
-  }
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/Socialpranker/fynd-dyrka-plugin"
 }

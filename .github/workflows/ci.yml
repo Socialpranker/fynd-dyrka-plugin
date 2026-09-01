@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Reference invariant (no orphans, no broken links, within budget)
+        run: python3 plugins/fynd-dyrka/skills/fynd-dyrka/scripts/check_refs.py
+
+      - name: Scripts compile
+        run: python3 -m compileall -q plugins/fynd-dyrka/skills/fynd-dyrka/scripts
+
+      - name: Fixtures compile
+        run: python3 -m compileall -q plugins/fynd-dyrka/skills/fynd-dyrka/fixtures
+
+      - name: Manifests and evals are valid JSON
+        run: |
+          python3 -c "
+          import json
+          for f in ['.claude-plugin/marketplace.json',
+                    'plugins/fynd-dyrka/.claude-plugin/plugin.json',
+                    'plugins/fynd-dyrka/skills/fynd-dyrka/evals/evals.json']:
+              json.load(open(f))
+              print('ok', f)
+          "
+
+      - name: Versions agree across manifests
+        run: |
+          python3 -c "
+          import json, sys
+          p = json.load(open('plugins/fynd-dyrka/.claude-plugin/plugin.json'))['version']
+          m = json.load(open('.claude-plugin/marketplace.json'))
+          versions = {p, m['metadata']['version'], m['plugins'][0]['version']}
+          if len(versions) != 1:
+              sys.exit(f'version mismatch across manifests: {versions}')
+          print('version', versions.pop())
+          "
+
+      - name: Semgrep rules are valid
+        run: |
+          pip install --quiet semgrep
+          semgrep --validate --config plugins/fynd-dyrka/skills/fynd-dyrka/assets/semgrep-rules.yml
+
+      - name: Orchestrator runs end to end on a fixture
+        run: |
+          python3 plugins/fynd-dyrka/skills/fynd-dyrka/scripts/scan.py \
+            --target plugins/fynd-dyrka/skills/fynd-dyrka/fixtures/swarm-territory \
+            --layers sast > /tmp/scan.json
+          python3 -c "
+          import json, sys
+          d = json.load(open('/tmp/scan.json'))
+          tools = d['tools']
+          if not tools:
+              sys.exit('no tools ran')
+          for t in tools:
+              print(t['tool'], t['status'], len(t.get('findings', [])), 'findings')
+          if all(t['status'] == 'error' for t in tools):
+              sys.exit('every tool errored')
+          "
