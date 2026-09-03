@@ -64,19 +64,38 @@ A pure-stdlib layer — it works on a bare machine with nothing to install. Prob
 | **git-exposure** | `/.git/HEAD\|config\|index\|logs/HEAD`, classified by content signature rather than status code | active | yes |
 | **security-headers** | HSTS/CSP/X-Frame/X-Content-Type plus reflective CORS with credentials | active | yes |
 | **js-secrets** | secrets in production JS bundles (AWS/Stripe/Slack/GitHub/private keys); values are masked | active | yes |
+| **injection-candidates** | crawls the same-origin GET surface (depth 2, ≤20 pages, ≤10 parameterised URLs) and flags a reflected HTML-metacharacter marker (XSS candidate) or a trailing quote that trips a DB error signature (SQLi candidate); POST forms are discovered but never submitted | active | yes |
+| **port-scan** | `nmap` over a curated list of database/admin/remote-access ports — not a full 0–65535 sweep, that's a dedicated tool's job | active | yes |
+| **sensitive-paths** | `.env`/`.env.local`, swagger/openapi (JSON + UI), `phpinfo.php`, `server-status`, `.aws/credentials`, `wp-config.php.bak`/`config.php.bak`, `.DS_Store` — classified by a content signature per path, not status code, so an SPA catch-all doesn't read as "found" | active | yes |
+| **http-methods** | `OPTIONS` on the base URL; flags `PUT`/`DELETE`/`TRACE`/`CONNECT` in the `Allow` header as worth a manual authorization check | active | yes |
 | **shodan-internetdb** | open ports and known CVEs by IP via `internetdb.shodan.io` (no key needed) | passive | no |
 | **email-spoofability** | SPF/DMARC → mail spoofing risk (requires `dig`) | passive | no |
+| **whois** | domain registration expiry via raw WHOIS (port 43): IANA referral → registry lookup; flags an expiry under 30 days out | passive | no |
+| **virustotal** | domain reputation via the VirusTotal API — vendor `malicious`/`suspicious` verdict counts; skipped without `VIRUSTOTAL_API_KEY` | passive | no |
 
-**Active vs passive.** Active probes send GETs to **the target** → the same gate
-as nuclei (localhost free, public domain only with `--authorized`). Passive
-probes hit **Shodan/DNS**, not the target, so they need no gate.
-`email-spoofability` is skipped when `dig` is unavailable (`brew install bind`;
-already present on macOS).
+**Active vs passive.** Active probes send GETs (or, for `http-methods`, an
+`OPTIONS`) to **the target** → the same gate as nuclei (localhost free, public
+domain only with `--authorized`). Passive probes hit a third party — Shodan,
+DNS, IANA and the domain's own registry, VirusTotal — never the target, so they
+need no gate. Three probes are opt-in on tooling or credentials rather than
+guaranteed to run, and all three skip rather than error when it's missing:
+`email-spoofability` needs `dig` (`brew install bind`; already present on
+macOS), `port-scan` needs `nmap`, `virustotal` needs a `VIRUSTOTAL_API_KEY`
+environment variable.
 
 Extensions to this layer that are deliberately NOT wired in (heavy external
 tools): subdomain enumeration (`subfinder`/`amass`) with a wildcard-DNS filter,
 and JS fetching through a full crawler (`katana`). Add them modelled on the
 existing probes.
+
+Two tools from a typical offensive-tooling inventory are deliberately left
+unimplemented, not merely deferred. **wpscan** is CMS-specific (WordPress) and
+has nothing to check against a service that isn't running WordPress — it
+doesn't generalize the way the probes above do. **hydra** is active credential
+brute-forcing: pointed at your own service it risks locking out real accounts
+or triggering a DoS, i.e. the scan itself becomes the incident. Neither is a
+"model it on the existing probes" candidate the way subfinder or katana are —
+they're excluded by design, not by priority.
 
 ## Install everything at once
 

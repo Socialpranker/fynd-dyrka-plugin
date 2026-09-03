@@ -32,7 +32,7 @@ entirely yours.
 | `deps` | Vulnerable dependencies (CVEs) | osv-scanner, trivy fs | lock files |
 | `iac` | Dockerfile / IaC / container misconfiguration | trivy config, hadolint | Dockerfile/manifests |
 | `dast` | Active probing of a **live** service, "as an attack" | nuclei | a running URL |
-| `recon` | External recon of a live URL: exposed `.git`, secrets in production JS, security headers/CORS, open ports and CVEs (Shodan), mail spoofability | stdlib (no external tools needed) | a running URL |
+| `recon` | External recon of a live URL: exposed `.git` and other sensitive paths, secrets in production JS, security headers/CORS/unsafe HTTP methods, a bounded same-origin crawl for reflected-XSS and SQLi candidates, open ports (Shodan passively, nmap actively on a curated list), mail spoofability, domain WHOIS expiry and VirusTotal reputation | stdlib; nmap optional for the active port check | a running URL |
 | `platform` | The real state of the production deployment: what is public, runtime variables, database access, CI/CD, config drift between repository and platform | `scan.py` handles Railway automatically; other platforms manually via `references/platform.md` | platform access |
 
 The first four read **code on disk**. `dast` and `recon` hit the **running
@@ -190,6 +190,12 @@ incoming files bounded? For a library: what happens on a **hostile argument**.
 🤖 **If the target is a bot or Mini App, read `references/bots.md`**
 (`initData` validation, replay via `auth_date`, callback-button races, dialogue
 state).
+
+🕵️ **If a human-layer / social-engineering test is explicitly part of this
+engagement's scope, read `references/social-engineering.md`** — it carries its
+own authorisation gate, separate from and stricter than Step 4: OSINT on named
+people and pretexting scenarios are not something a generic "check the
+security" request opts into by default.
 
 Then assemble six inventories — each one through `grep`/`Read`, never from
 memory. Items 5 and 6 may be skipped only explicitly, as a line in Coverage,
@@ -788,6 +794,9 @@ References for review and triage:
 - `references/attack-chains.md` — the `requires`/`amplifiers`/`severity+1` rule
   plus 4 chain templates (Step 6).
 - `references/mitre-map.md` — the vuln→MITRE ATT&CK ID table (Step 6).
+- `references/social-engineering.md` — OSINT on staff by role, 4 pretexting
+  scenarios, a physical-security checklist, phishing-risk scoring; an optional
+  layer gated behind its own explicit-scope confirmation (Step 1/2).
 
 ## Boundaries
 
