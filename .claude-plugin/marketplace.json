@@ -4,14 +4,14 @@
     "name": "Socialpranker"
   },
   "metadata": {
-    "version": "1.2.0",
+    "version": "1.3.0",
     "description": "Marketplace for the fynd-dyrka security plugin"
   },
   "plugins": [
     {
       "name": "fynd-dyrka",
-      "version": "1.2.0",
-      "description": "Security review in seven layers: SAST, secrets, dependencies, IaC, DAST, external recon of a live service, and platform — the real state of the production deployment. Orchestrates semgrep/gitleaks/osv-scanner/trivy/nuclei plus manual review of logic flaws (auth, IDOR, SSRF, races over money), availability and cost, MITRE mapping, and the agentic surface (LLM/MCP/RAG).",
+      "version": "1.3.0",
+      "description": "Security review in seven layers: SAST, secrets, dependencies, IaC, DAST, external recon of a live service including an optional social-engineering layer, and platform — the real state of the production deployment. Orchestrates semgrep/gitleaks/osv-scanner/trivy/nuclei plus manual review of logic flaws (auth, IDOR, SSRF, races over money), availability and cost, MITRE mapping, and the agentic surface (LLM/MCP/RAG).",
       "source": "./plugins/fynd-dyrka"
     }
   ]
