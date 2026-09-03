@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.3.0 — 2026-09-03
+
+### Added
+- Six new recon checks in `scan.py`: `scan_sensitive_paths` (`.env`, swagger/
+  openapi, phpinfo, server-status, `.aws/credentials`, backup files —
+  classified by content, not status code), `scan_http_methods` (flags PUT/
+  DELETE/TRACE/CONNECT via OPTIONS), `scan_injection_candidates` (a bounded
+  same-origin crawl — depth 2, at most 20 pages, at most 10 parameterised URLs
+  — with reflected-XSS marker and single-quote SQLi-signature detection;
+  GET-only, a POST form is found but never auto-submitted), `scan_port_scan`
+  (nmap over a curated database/admin/remote-access port list, not a full
+  sweep, skipped without nmap), `scan_whois` (a raw two-hop socket lookup
+  flagging a domain expiring within 30 days), `scan_virustotal_reputation`
+  (skipped without `VIRUSTOTAL_API_KEY`).
+- `references/social-engineering.md` — an optional human-layer reference
+  (OSINT by role, 4 pretexting scenarios, a physical-security checklist,
+  phishing-risk scoring), gated behind its own explicit-scope confirmation,
+  separate from and stricter than the Step 4 code/service gate.
+- `scanners.md` documents all six new checks, plus why `wpscan` and `hydra`
+  (present in the tool inventory) are intentionally not wired into any
+  scanner: CMS-specific and active credential brute-force respectively — the
+  latter risks locking out accounts on the very service being reviewed.
+
+### Changed
+- The `recon` row in the Layers table, and the plugin/marketplace
+  descriptions, now reflect the expanded checks. `recon` is no longer purely
+  stdlib: the port-scan check optionally shells out to `nmap`, skipped (not
+  an error) when it is absent — the same convention `scan_nuclei` already
+  used for `nuclei`.
+
 ## 1.2.0 — 2026-09-01
 
 First public release.

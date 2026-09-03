@@ -50,7 +50,8 @@ import time
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from typing import Any, Callable
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin, parse_qs, urlencode, quote
+from html.parser import HTMLParser
 
 ALL_LAYERS = ["sast", "secrets", "deps", "iac", "dast", "recon", "platform"]
 
@@ -908,13 +909,21 @@ _RISKY_PORTS = {
 
 
 def _http_get(
-    url: str, timeout: int, max_bytes: int = 65536, origin: str | None = None
+    url: str,
+    timeout: int,
+    max_bytes: int = 65536,
+    origin: str | None = None,
+    method: str = "GET",
 ) -> tuple[int, dict, bytes]:
-    """GET without following redirects. Returns (status, headers, body[:max_bytes]).
+    """GET (or `method`) without following redirects. Returns
+    (status, headers, body[:max_bytes]).
 
     Redirects are deliberately not followed: first, a redirect is itself a signal
     (open redirect / a private destination); second, blindly following Location
     is an SSRF pedal. status=-1 on a network error.
+
+    `method` defaults to "GET" so every existing call site is unaffected; pass
+    e.g. "OPTIONS" for a verb probe.
     """
 
     class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -925,7 +934,7 @@ def _http_get(
     if origin:
         headers["Origin"] = origin
     opener = urllib.request.build_opener(_NoRedirect)
-    req = urllib.request.Request(url, headers=headers)
+    req = urllib.request.Request(url, headers=headers, method=method)
     try:
         resp = opener.open(req, timeout=timeout)
         return resp.status, dict(resp.headers), resp.read(max_bytes)
@@ -1153,7 +1162,10 @@ def scan_shodan_internetdb(url: str, timeout: int, raw_dir: str | None) -> ToolR
     try:
         ip = socket.gethostbyname(host)
         if ipaddress.ip_address(ip).is_private:
-            r.status, r.reason = "skipped", f"{host} resolves to private IP {ip}, skipped"
+            r.status, r.reason = (
+                "skipped",
+                f"{host} resolves to private IP {ip}, skipped",
+            )
             return r
         status, _hdr, body = _http_get(f"https://internetdb.shodan.io/{ip}", timeout)
         _dump_raw(raw_dir, "shodan-internetdb", body.decode("utf-8", "replace"))
@@ -1863,17 +1875,671 @@ IAC_SCANNERS: list[Callable] = [scan_trivy_config, scan_hadolint]
 # infrastructure rather than against an arbitrary third-party target.
 PLATFORM_SCANNERS: list[Callable] = [scan_railway_exposure, scan_deploy_config_drift]
 
+_INJECTION_MARKER = "fyxd7419qz"
+_XSS_PROBE = f'{_INJECTION_MARKER}"><'
+
+_SQLI_ERROR_SIGNATURES = [
+    "sql syntax",
+    "mysql_fetch",
+    "you have an error in your sql",
+    "unclosed quotation mark",
+    "quoted string not properly terminated",
+    "sqlstate",
+    "pg_query(): query failed",
+    "sqlite3::",
+    "ora-01756",
+    "ora-00933",
+    "warning: mysqli",
+    "syntax error at or near",
+]
+
+
+class _LinkExtractor(HTMLParser):
+    """Collects <a href> and GET <form action> targets from static HTML only —
+    nothing here executes JavaScript, so a client-rendered SPA's own router
+    links will not be found (a known blind spot, not a bug)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.links: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        d = dict(attrs)
+        if tag == "a" and d.get("href"):
+            self.links.append(d["href"])
+        elif (
+            tag == "form"
+            and d.get("action")
+            and d.get("method", "get").lower() != "post"
+        ):
+            self.links.append(d["action"])
+
+
+def _extract_links(html_bytes: bytes, page_url: str) -> list[str]:
+    parser = _LinkExtractor()
+    try:
+        parser.feed(html_bytes.decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001
+        return []
+    return [urljoin(page_url, h) for h in parser.links]
+
+
+def scan_injection_candidates(
+    url: str, timeout: int, raw_dir: str | None
+) -> ToolResult:
+    """Crawl the same-origin GET surface, then flag parameters that reflect an
+    HTML-metacharacter marker unescaped or change the response on a single
+    trailing quote.
+
+    Bounded and GET-only by construction: BFS depth 2, at most 20 pages, at most
+    10 parameterised URLs with up to 2 parameters each — finishes in well under a
+    minute because that is the entire crawl budget, not because of tuning. Only
+    GET requests are ever sent: a POST form (checkout, delete, contact) is
+    discovered and skipped, never auto-submitted, because auto-submitting an
+    arbitrary POST body risks a real side effect on the target that a GET crawl
+    does not. The SQLi probe is a single appended quote — the same first move a
+    human tester makes; enough to surface an error signature, not enough to
+    construct a working injection.
+    """
+    r = ToolResult(tool="injection-candidates", layer="recon", status="ok")
+    base = _base_url(url)
+    base_netloc = urlparse(base).netloc
+    seen_pages: set[str] = set()
+    queue: list[tuple[str, int]] = [(url.split("#", 1)[0], 0)]
+    param_urls: set[str] = set()
+    raw_lines: list[str] = []
+    try:
+        while queue and len(seen_pages) < 20:
+            page, depth = queue.pop(0)
+            if page in seen_pages or urlparse(page).netloc != base_netloc:
+                continue
+            seen_pages.add(page)
+            status, hdr, body = _http_get(page, timeout)
+            raw_lines.append(f"{status} {page}")
+            ctype = {k.lower(): v for k, v in hdr.items()}.get("content-type", "")
+            if status != 200 or "html" not in ctype.lower():
+                continue
+            if urlparse(page).query:
+                param_urls.add(page)
+            if depth < 2:
+                for link in _extract_links(body, page):
+                    link = link.split("#", 1)[0]
+                    if urlparse(link).netloc == base_netloc and link not in seen_pages:
+                        queue.append((link, depth + 1))
+
+        for target_url in list(param_urls)[:10]:
+            parsed = urlparse(target_url)
+            params = parse_qs(parsed.query, keep_blank_values=True)
+            _bstatus, _bhdr, base_body = _http_get(target_url, timeout)
+            base_text = base_body.decode("utf-8", "replace").lower()
+            for pname in list(params)[:2]:
+                orig = params[pname]
+
+                xss_params = dict(params)
+                xss_params[pname] = [_XSS_PROBE]
+                xss_url = parsed._replace(
+                    query=urlencode(xss_params, doseq=True)
+                ).geturl()
+                _s2, _h2, xss_body = _http_get(xss_url, timeout)
+                if _XSS_PROBE.encode() in xss_body:
+                    r.findings.append(
+                        finding(
+                            severity="MEDIUM",
+                            title=f"Unescaped reflection of parameter '{pname}'",
+                            location=target_url,
+                            identifier="reflected-xss-candidate",
+                            description="An HTML-metacharacter marker came back "
+                            "unescaped in the response — check with a real "
+                            "browser before reporting as exploitable XSS.",
+                            tool="injection-candidates",
+                        )
+                    )
+
+                sqli_params = dict(params)
+                sqli_params[pname] = [orig[0] + "'"]
+                sqli_url = parsed._replace(
+                    query=urlencode(sqli_params, doseq=True)
+                ).geturl()
+                _s3, _h3, sqli_body = _http_get(sqli_url, timeout)
+                sqli_text = sqli_body.decode("utf-8", "replace").lower()
+                hit = next(
+                    (
+                        sig
+                        for sig in _SQLI_ERROR_SIGNATURES
+                        if sig in sqli_text and sig not in base_text
+                    ),
+                    None,
+                )
+                if hit:
+                    r.findings.append(
+                        finding(
+                            severity="HIGH",
+                            title=f"Possible SQL injection in parameter '{pname}'",
+                            location=target_url,
+                            identifier="sqli-candidate",
+                            description=f"A trailing quote produced a database "
+                            f"error signature ('{hit}') absent from the baseline "
+                            "response. Confirm with a boolean-based probe before "
+                            "reporting as CRITICAL.",
+                            tool="injection-candidates",
+                        )
+                    )
+        r.reason = (
+            f"{len(seen_pages)} pages crawled, {len(param_urls)} parameterised "
+            "URLs tested"
+        )
+        _dump_raw(raw_dir, "injection-candidates", "\n".join(raw_lines))
+    except Exception as e:  # noqa: BLE001
+        r.status, r.reason = "error", str(e)[:300]
+    return r
+
+
+_SENSITIVE_PORTS: dict[int, tuple[str, str, str]] = {
+    21: ("HIGH", "FTP", "cleartext credentials"),
+    23: ("HIGH", "Telnet", "cleartext remote shell"),
+    22: ("INFO", "SSH", "often intentionally open — confirm key-only auth"),
+    3389: ("MEDIUM", "RDP", "remote desktop exposed to the internet"),
+    3306: ("HIGH", "MySQL", "database port reachable from the internet"),
+    5432: ("HIGH", "PostgreSQL", "database port reachable from the internet"),
+    6379: ("HIGH", "Redis", "often unauthenticated by default"),
+    27017: ("HIGH", "MongoDB", "frequently unauthenticated by default"),
+    9200: ("HIGH", "Elasticsearch", "no auth by default, full data read/write"),
+    5984: ("MEDIUM", "CouchDB", "check for anonymous admin access"),
+    1433: ("HIGH", "MSSQL", "database port reachable from the internet"),
+    2375: ("CRITICAL", "Docker API", "no TLS — container escape to host"),
+    2376: ("MEDIUM", "Docker API (TLS)", "confirm client-cert auth is enforced"),
+    6443: ("HIGH", "Kubernetes API", "confirm auth/RBAC, not anonymous"),
+    2379: ("HIGH", "etcd", "cluster state and secrets, rarely meant to be public"),
+    9000: ("LOW", "admin panel / MinIO", "confirm auth is enforced"),
+    9090: ("LOW", "admin/metrics", "confirm auth is enforced"),
+}
+
+
+def scan_port_scan(url: str, timeout: int, raw_dir: str | None) -> ToolResult:
+    """nmap over a curated list of database / admin / remote-access ports, not a
+    full sweep — a 0-65535 port sweep is a dedicated tool's job (masscan), not a
+    security-review skill's recon layer. This answers the one question that
+    matters most here: is a data store or an admin surface reachable from the
+    internet that nobody meant to expose.
+    """
+    r = ToolResult(tool="port-scan", layer="recon", status="skipped")
+    if not have("nmap"):
+        r.reason = "nmap not installed (apt/brew install nmap)"
+        return r
+    host = urlparse(url).hostname
+    if not host:
+        r.status, r.reason = "error", "could not extract a host from the URL"
+        return r
+    ports = ",".join(str(p) for p in _SENSITIVE_PORTS)
+    t0 = time.time()
+    try:
+        proc = run_cmd(
+            ["nmap", "-Pn", "-T4", "--host-timeout", "20s", "-p", ports, host],
+            timeout=timeout,
+        )
+        r.duration_s = round(time.time() - t0, 1)
+        out = proc.stdout or ""
+        r.raw_available = _dump_raw(raw_dir, "port-scan", out)
+        for line in out.splitlines():
+            m = _re.match(r"^(\d+)/tcp\s+open\s", line.strip())
+            if not m:
+                continue
+            port = int(m.group(1))
+            sev, name, why = _SENSITIVE_PORTS.get(port, ("LOW", f"port {port}", "open"))
+            r.findings.append(
+                finding(
+                    severity=sev,
+                    title=f"{name} reachable from the internet ({port}/tcp)",
+                    location=f"{host}:{port}",
+                    identifier=f"port-{port}",
+                    description=why,
+                    tool="port-scan",
+                )
+            )
+        if proc.returncode != 0 and "open" not in out:
+            r.status, r.reason = (
+                "error",
+                (proc.stderr or f"exit {proc.returncode}")[:300],
+            )
+        else:
+            r.status = "ok"
+    except subprocess.TimeoutExpired:
+        r.status, r.reason = f"timeout after {timeout}s"
+    except Exception as e:  # noqa: BLE001
+        r.status, r.reason = "error", str(e)[:300]
+    return r
+
+
+_SENSITIVE_PATHS = [
+    "/.env",
+    "/.env.local",
+    "/swagger.json",
+    "/swagger-ui.html",
+    "/openapi.json",
+    "/phpinfo.php",
+    "/server-status",
+    "/.aws/credentials",
+    "/wp-config.php.bak",
+    "/config.php.bak",
+    "/.DS_Store",
+]
+
+
+def _is_html_body(body: bytes) -> bool:
+    head = body[:200].lower()
+    return b"<html" in head or b"<!doctype" in head
+
+
+def _classify_sensitive_path(path: str, body: bytes) -> tuple[str, str] | None:
+    """(severity, why) for a 200-with-body response, or None when it looks like
+    a generic page (SPA catch-all, custom 404) rather than the real file — the
+    same content-over-status-code rule as scan_git_exposure, applied per path.
+    """
+    is_html = _is_html_body(body)
+
+    if path in ("/.env", "/.env.local"):
+        if is_html:
+            return None
+        text = body.decode("utf-8", "replace")
+        lines = [
+            ln
+            for ln in text.splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")
+        ]
+        kv = [ln for ln in lines if _re.match(r"^[A-Za-z_][A-Za-z0-9_]*\s*=", ln)]
+        if lines and len(kv) >= max(1, len(lines) // 2):
+            return "HIGH", f"looks like a real dotenv file: {len(kv)} KEY=value line(s)"
+        return None
+
+    if path == "/phpinfo.php":
+        if b"phpinfo()" in body.lower():
+            return (
+                "MEDIUM",
+                "phpinfo() output — server paths, loaded extensions, env vars",
+            )
+        return None
+
+    if path == "/server-status":
+        low = body.lower()
+        if b"apache server status" in low or b"scoreboard" in low:
+            return (
+                "MEDIUM",
+                "Apache mod_status exposed — live requests, client IPs, internal routes",
+            )
+        return None
+
+    if path in ("/swagger.json", "/openapi.json"):
+        try:
+            data = json.loads(body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return None
+        if isinstance(data, dict) and ("swagger" in data or "openapi" in data):
+            return (
+                "LOW",
+                f"{path.lstrip('/')}: machine-readable API schema publicly exposed",
+            )
+        return None
+
+    if path == "/swagger-ui.html":
+        low = body.lower()
+        if b"swagger-ui" in low or b"swagger ui" in low:
+            return (
+                "LOW",
+                "Swagger UI console exposed — calls the API directly from a browser",
+            )
+        return None
+
+    if path == "/.aws/credentials":
+        low = body.lower()
+        if b"aws_access_key_id" in low or b"aws_secret_access_key" in low:
+            return "CRITICAL", "AWS credentials file with recognizable key fields"
+        if not is_html:
+            return "HIGH", "non-empty, non-HTML response for /.aws/credentials"
+        return None
+
+    if path in ("/wp-config.php.bak", "/config.php.bak"):
+        low = body.lower()
+        if b"<?php" in low or b"db_password" in low or b"define(" in low:
+            return "HIGH", f"looks like real PHP config source ({path})"
+        if not is_html:
+            return "MEDIUM", f"non-empty, non-HTML response for {path}"
+        return None
+
+    if path == "/.DS_Store":
+        if b"Bud1" in body[:64]:
+            return (
+                "MEDIUM",
+                "genuine .DS_Store (Bud1 magic) — leaks a directory's file listing",
+            )
+        if not is_html:
+            return (
+                "LOW",
+                "non-empty, non-HTML response for /.DS_Store (signature unconfirmed)",
+            )
+        return None
+
+    return None
+
+
+def scan_sensitive_paths(url: str, timeout: int, raw_dir: str | None) -> ToolResult:
+    """Common sensitive files/endpoints beyond .git (scan_git_exposure already
+    covers that one). Classified by CONTENT, not status code, for the same
+    reason as scan_git_exposure: an SPA with a catch-all route answers every
+    path with 200 + its index page, which would otherwise read as "found".
+    One finding at the single worst hit, not one per path — a target either
+    leaks something here or it doesn't; a pile of near-duplicate findings for
+    ten probed paths would just be noise.
+    """
+    r = ToolResult(tool="sensitive-paths", layer="recon", status="ok")
+    base = _base_url(url)
+    hits: dict[str, tuple[str, str]] = {}
+    raw_lines: list[str] = []
+    try:
+        for path in _SENSITIVE_PATHS:
+            status, _hdr, body = _http_get(base + path, timeout)
+            raw_lines.append(f"{status} {path} ({len(body)}b)")
+            if status != 200 or not body:
+                continue
+            hit = _classify_sensitive_path(path, body)
+            if hit:
+                hits[path] = hit
+        if hits:
+            best_path = max(hits, key=lambda p: SEVERITY_RANK[hits[p][0]])
+            best_sev, best_why = hits[best_path]
+            paths = ", ".join(sorted(hits))
+            extra = f" Also responding: {paths}." if len(hits) > 1 else ""
+            r.findings.append(
+                finding(
+                    severity=best_sev,
+                    title=f"Sensitive path exposed: {best_path}",
+                    location=base + best_path,
+                    identifier="sensitive-path",
+                    description=f"{best_why}.{extra}",
+                    tool="sensitive-paths",
+                )
+            )
+        r.reason = f"{len(_SENSITIVE_PATHS)} path(s) probed, {len(hits)} hit(s)"
+        _dump_raw(raw_dir, "sensitive-paths", "\n".join(raw_lines))
+    except Exception as e:  # noqa: BLE001
+        r.status, r.reason = "error", str(e)[:300]
+    return r
+
+
+_DANGEROUS_HTTP_METHODS = {"PUT", "DELETE", "TRACE", "CONNECT"}
+
+
+def scan_http_methods(url: str, timeout: int, raw_dir: str | None) -> ToolResult:
+    """OPTIONS on the base URL, then read the Allow header for verbs that are
+    dangerous when reachable without whatever authorization the site's normal
+    routes enforce. Not proof of exploitability on its own — a WAF or the
+    framework's router may still gate these — but worth a manual check
+    whenever they show up.
+    """
+    r = ToolResult(tool="http-methods", layer="recon", status="ok")
+    base = _base_url(url)
+    try:
+        status, hdr, _body = _http_get(base + "/", timeout, method="OPTIONS")
+        if status < 0:
+            r.status, r.reason = "error", "target unreachable"
+            return r
+        h = {k.lower(): v for k, v in hdr.items()}
+        allow = h.get("allow", "")
+        methods = {m.strip().upper() for m in allow.split(",") if m.strip()}
+        risky = sorted(methods & _DANGEROUS_HTTP_METHODS)
+        if risky:
+            r.findings.append(
+                finding(
+                    severity="MEDIUM",
+                    title=f"Potentially dangerous HTTP method(s) allowed: {', '.join(risky)}",
+                    location=base + "/",
+                    identifier="http-methods-risky",
+                    description=(
+                        f"Allow: {allow}. Not necessarily exploitable — verify "
+                        "that authorization is enforced on these verbs before "
+                        "escalating; PUT/DELETE can mean a writable resource, "
+                        "TRACE can enable cross-site tracing, CONNECT can turn "
+                        "the server into an open proxy."
+                    ),
+                    tool="http-methods",
+                )
+            )
+        else:
+            r.reason = (
+                f"Allow: {allow}"
+                if allow
+                else "no Allow header in the OPTIONS response"
+            )
+        _dump_raw(raw_dir, "http-methods", f"{status} Allow: {allow}")
+    except Exception as e:  # noqa: BLE001
+        r.status, r.reason = "error", str(e)[:300]
+    return r
+
+
+_WHOIS_EXPIRY_PATTERNS = [
+    _re.compile(r"(?im)^\s*Registry Expiry Date:\s*(.+)$"),
+    _re.compile(r"(?im)^\s*Expiry Date:\s*(.+)$"),
+    _re.compile(r"(?im)^\s*paid-till:\s*(.+)$"),
+]
+
+
+def _whois_query(host: str, domain: str, timeout: int, max_bytes: int = 65536) -> str:
+    """One WHOIS request over a raw TCP socket (port 43, RFC 3912) — no
+    external `whois` binary, no python-whois dependency. `timeout` bounds both
+    the connect and every recv, so a server that accepts the connection and
+    then never answers cannot hang the scan.
+    """
+    out = bytearray()
+    with socket.create_connection((host, 43), timeout=timeout) as sock:
+        sock.sendall((domain + "\r\n").encode("ascii", "ignore"))
+        while len(out) < max_bytes:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            out.extend(chunk)
+    return bytes(out[:max_bytes]).decode("utf-8", "replace")
+
+
+def _parse_whois_expiry(text: str) -> datetime | None:
+    """First matching expiry field, tried in order — registries disagree on
+    which label they use, not just on date format."""
+    raw = None
+    for pat in _WHOIS_EXPIRY_PATTERNS:
+        m = pat.search(text)
+        if m:
+            raw = m.group(1).strip().rstrip(".")
+            break
+    if not raw:
+        return None
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%SZ",
+        "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%d",
+        "%d-%b-%Y",
+        "%d.%m.%Y",
+    ):
+        try:
+            dt = datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    return None
+
+
+def scan_whois(url: str, timeout: int, raw_dir: str | None) -> ToolResult:
+    """Domain registration expiry via WHOIS: query whois.iana.org, follow its
+    `refer:` line to the registry that actually holds the record, query that
+    server, then parse an expiry date out of whatever format it used.
+
+    This is passive against a third party (IANA plus the registry, never the
+    target), so — like email-spoofability — it needs no --authorized gate.
+
+    The frame here is operational availability of the USER'S OWN domain, not
+    "is this someone else's suspiciously new domain": an unrenewed
+    registration takes the whole service dark regardless of how sound the code
+    is. WHOIS formats are notoriously inconsistent across registrars, so any
+    failure to reach a server or recognize its field names is reported as
+    status="ok" with an explanatory reason, never as an error — this scanner
+    genuinely cannot promise an answer for every TLD.
+    """
+    r = ToolResult(tool="whois", layer="recon", status="ok")
+    host = (urlparse(url).hostname or "").strip()
+    domain = ".".join(host.split(".")[-2:]) if host.count(".") >= 1 else host
+    if not domain:
+        r.status, r.reason = "error", "no domain in url"
+        return r
+    try:
+        iana_raw = _whois_query("whois.iana.org", domain, timeout)
+        m = _re.search(r"(?im)^refer:\s*(\S+)", iana_raw)
+        if not m:
+            r.reason = "could not determine expiry (no referral from whois.iana.org)"
+            _dump_raw(raw_dir, "whois", iana_raw)
+            return r
+        registry_host = m.group(1)
+        registry_raw = _whois_query(registry_host, domain, timeout)
+        _dump_raw(
+            raw_dir,
+            "whois",
+            f"{iana_raw}\n\n--- {registry_host} ---\n{registry_raw}",
+        )
+
+        expiry = _parse_whois_expiry(registry_raw)
+        if not expiry:
+            r.reason = "could not determine expiry (unrecognized registrar format)"
+            return r
+
+        days_left = (expiry - datetime.now(timezone.utc)).days
+        if days_left < 30:
+            r.findings.append(
+                finding(
+                    severity="MEDIUM",
+                    title=f"Domain registration for {domain} expires soon",
+                    location=domain,
+                    identifier="whois-expiry-soon",
+                    description=(
+                        f"Registration expires {expiry.date().isoformat()} "
+                        f"({days_left} day(s)). This is about operational "
+                        "availability, not a suspicious registration: the "
+                        "service goes dark if it is not renewed in time."
+                    ),
+                    tool="whois",
+                )
+            )
+        else:
+            r.reason = (
+                f"expires {expiry.date().isoformat()} ({days_left} days) — not urgent"
+            )
+    except Exception as e:  # noqa: BLE001
+        # WHOIS servers are flaky and inconsistent by nature (rate limits, TLDs
+        # with no port-43 service, registries that block automated clients) —
+        # per this function's own docstring, that is a shrug, not a scan failure.
+        r.reason = f"could not determine expiry: {str(e)[:200]}"
+    return r
+
+
+def scan_virustotal_reputation(
+    url: str, timeout: int, raw_dir: str | None
+) -> ToolResult:
+    """Domain reputation via VirusTotal's public API. Passive — it queries a
+    third party about the domain, never the target itself — so, like
+    shodan-internetdb, it needs no --authorized gate. This is opt-in
+    enrichment rather than a scanner someone is expected to install: with no
+    VIRUSTOTAL_API_KEY it skips immediately, the same convention
+    railway-exposure uses for a missing CLI login.
+    """
+    api_key = os.environ.get("VIRUSTOTAL_API_KEY")
+    if not api_key:
+        return ToolResult(
+            tool="virustotal",
+            layer="recon",
+            status="skipped",
+            reason="no VIRUSTOTAL_API_KEY",
+        )
+    r = ToolResult(tool="virustotal", layer="recon", status="ok")
+    host = (urlparse(url).hostname or "").strip()
+    domain = ".".join(host.split(".")[-2:]) if host.count(".") >= 1 else host
+    if not domain:
+        r.status, r.reason = "error", "no domain in url"
+        return r
+    try:
+        api_url = f"https://www.virustotal.com/api/v3/domains/{quote(domain, safe='')}"
+        req = urllib.request.Request(
+            api_url, headers={"x-apikey": api_key, "User-Agent": _RECON_UA}
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=timeout)
+            status, body = resp.status, resp.read(65536)
+        except urllib.error.HTTPError as e:
+            try:
+                body = e.read(65536)
+            except Exception:  # noqa: BLE001
+                body = b""
+            status = e.code
+        _dump_raw(raw_dir, "virustotal", body.decode("utf-8", "replace"))
+        if status == 401:
+            r.status, r.reason = "error", "VirusTotal rejected the API key (401)"
+            return r
+        if status == 404:
+            r.reason = f"{domain}: not known to VirusTotal"
+            return r
+        if status != 200:
+            r.status, r.reason = "error", f"VirusTotal status {status}"
+            return r
+        data = json.loads(body or "{}")
+        data_obj = data.get("data") or {}
+        attributes = data_obj.get("attributes") or {}
+        stats = attributes.get("last_analysis_stats") or {}
+        malicious = stats.get("malicious", 0) or 0
+        suspicious = stats.get("suspicious", 0) or 0
+        flagged = malicious + suspicious
+        if flagged > 0:
+            r.findings.append(
+                finding(
+                    severity="HIGH",
+                    title=f"Domain flagged by {flagged} security vendor(s) on VirusTotal",
+                    location=f"https://www.virustotal.com/gui/domain/{domain}",
+                    identifier="virustotal-flagged",
+                    description=(
+                        f"{malicious} malicious / {suspicious} suspicious "
+                        f"verdict(s) for {domain}. If this is your own domain, "
+                        "check whether it has actually been compromised "
+                        "(malware, a phishing kit) or the flags are stale/false "
+                        "positives."
+                    ),
+                    tool="virustotal",
+                )
+            )
+        else:
+            r.reason = f"{domain}: 0 malicious/suspicious verdicts on VirusTotal"
+    except json.JSONDecodeError:
+        r.status, r.reason = "error", "VirusTotal returned non-JSON"
+    except Exception as e:  # noqa: BLE001
+        r.status, r.reason = "error", str(e)[:300]
+    return r
+
+
 # Recon: active probes hit the target (the same --authorized gate as nuclei),
 # passive ones hit third-party services and DNS (no gate). Each is
-# (url, timeout, raw_dir) -> ToolResult, like the other scanners.
+# (url, timeout, raw_dir) -> ToolResult, like the other scanners. Every active
+# probe is pure stdlib except port-scan, which shells out to nmap and is
+# skipped (not an error) when nmap is missing — same convention as
+# scan_nuclei's have("nuclei") check. virustotal is passive but still needs an
+# opt-in API key, so it skips (not errors) without VIRUSTOTAL_API_KEY, the same
+# convention railway-exposure uses for a missing CLI login.
 RECON_ACTIVE_SCANNERS: list[Callable] = [
     scan_git_exposure,
     scan_security_headers,
     scan_js_secrets,
+    scan_injection_candidates,
+    scan_port_scan,
+    scan_sensitive_paths,
+    scan_http_methods,
 ]
 RECON_PASSIVE_SCANNERS: list[Callable] = [
     scan_shodan_internetdb,
     scan_email_spoofability,
+    scan_whois,
+    scan_virustotal_reputation,
 ]
 
 
