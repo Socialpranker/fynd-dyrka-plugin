@@ -4,7 +4,9 @@ A surface absent from OWASP WSTG/ASVS, where a web application is a
 deterministic system. Here a component makes decisions from text that an
 attacker partly controls, and calls side-effecting tools on those decisions.
 Sources: OWASP Top 10 for LLM Applications 2025, OWASP Top 10 for Agentic
-Applications 2026, the OWASP MCP Security Cheat Sheet, MITRE ATLAS.
+Applications 2026 (**existence not verified** — cited from earlier notes, not
+checked against the OWASP site), the OWASP MCP Security Cheat Sheet, the OWASP MCP
+Top 10 (beta), the MCP specification's Security Best Practices, MITRE ATLAS.
 
 **Scope of this file.** Prompt injection as a technique (source → prompt, direct
 vs indirect, markdown exfiltration) is covered in `injection.md` §11 and not
@@ -56,6 +58,46 @@ forming. The OWASP MCP Security Cheat Sheet is the primary document for the clas
 **The quick question:** for each attached server, can you say why each requested
 permission is needed for that server's function? If not, it is the same excess
 authority as §1.
+
+### 2a. MCP: OWASP MCP Top 10 (beta) and the spec's security requirements
+
+The two sources below were read through page summaries during the wave-1
+research. **[confirmed]** marks what those pages state; **[assumption]** marks my
+reading of a title or a grep signal that no page spelled out. Apply this only when
+the project **is** an MCP server, hosts one, or is an MCP client that connects to
+servers (`mcp.json`, `@modelcontextprotocol`, an `mcpServers` section).
+
+**OWASP MCP Top 10** — "Beta Release (Phase 3 of 5)", 2025, ten items,
+MCP01–MCP10 **[confirmed]**. §2 above already covers MCP03 (tool poisoning), and
+the rest map onto other sections of this file (MCP04 → §8, MCP05 → §5, MCP06 →
+`injection.md` §11, MCP08 → §9, MCP10 → §4 — the mapping is mine
+**[assumption]**). Four items had no place in this file. **Only their titles are
+confirmed**; the checks are my reading of those titles:
+
+| Item | Title **[confirmed]** | What to check **[assumption]** |
+|---|---|---|
+| MCP01 | Token Mismanagement & Secret Exposure | tokens and secrets in protocol logs, in tool results and in the model's context or memory; long-lived tokens in `mcp.json` or env files committed to the repository |
+| MCP02 | Privilege Escalation via Scope Creep | scopes granted at attach time versus scopes the tool needs; a server that quietly requests more later; a wide token where a narrow one would do |
+| MCP07 | Insufficient Authentication & Authorization | the MCP server's **own** authn/authz: an HTTP/SSE endpoint reachable with no token, per-tool authorisation absent, one shared credential for all callers |
+| MCP09 | Shadow MCP Servers | servers present in configs (`.mcp.json`, user and project settings, container images) that nobody inventoried or reviewed; auto-attached from a repository |
+
+**MCP specification, Security Best Practices** (a `draft` page that points at the
+2025-11-25 revision — re-read the current text before quoting) **[confirmed]**.
+These have grep-checkable signals and none was in this file before:
+
+| Requirement | What the spec says **[confirmed]** | Grep or inspect **[assumption]** |
+|---|---|---|
+| **Token passthrough** | the server "MUST NOT accept any tokens that were not explicitly issued for the MCP server"; verify the **audience** | incoming tokens validated with no `aud` check; the client's `Authorization` header forwarded unchanged to a downstream API |
+| **Confused deputy in an OAuth proxy** | the pattern: a static client ID at the third-party authorisation server, dynamic client registration and a consent cookie; the spec requires per-client consent ("MUST implement per-client consent") and `state` only after consent | one consent (or one cookie) shared across dynamically registered clients; consent skipped when the cookie exists; the proxy's own static client ID reused for every client |
+| **Exact `redirect_uri`** | exact match of the registered `redirect_uri` | `redirect_uri` compared with `startswith`, `in`, `includes`, a regex or a wildcard; RFC 9700 asks for exact string comparison too **[confirmed]** |
+| **Scope minimisation** | no wildcard or `all` scopes; do not publish the whole catalogue in `scopes_supported` | `scopes_supported` listing everything; `*` or `all` scopes; a token issued with more scope than the tool's function |
+| **Local MCP server compromise** | the **start command** sits in the client configuration; require consent before running it, sandbox it, prefer stdio or a token / unix socket over an open port | the exact `command` / `args` in `mcp.json` shown to the user and confirmed before launch; a config inside a cloned repository that starts on open; a localhost server with no token |
+| **State handle** | "MUST NOT treat possession of a state handle as authentication"; bind it to `<user_id>:<handle>` | a handle looked up by value alone, with no owner check |
+| **SSRF during OAuth discovery** | block private and link-local addresses (`169.254.169.254`), DNS rebinding and redirects while fetching discovery metadata | the discovery fetch is an outbound request to an attacker-influenced URL — the whole of `ssrf-bypasses.md` applies |
+
+Confirm each as any other finding (Step 3): a PoC that shows the token issued for
+another audience being accepted, or the consent skipped, with a control where the
+fixed check rejects it.
 
 ## 3. Agent identity (non-human identity)
 
@@ -191,6 +233,7 @@ Do not leave the item silent.
 | Excessive agency | the tool list in the agent's configuration; a confirmation step before money, sending, or deletion | a closed tool list scoped to the task, human in the loop on irreversible actions, no self-escalation |
 | Tool poisoning (MCP) | the `description` text of every MCP tool, for imperatives unrelated to its function | review descriptions when attaching a server; never treat a description as neutral documentation |
 | Rug pull (MCP) | the version/hash of the tool definition at attach time vs at call time | pin the server version, diff definitions between sessions |
+| MCP token passthrough / OAuth proxy (spec) | `aud` validation on incoming tokens, the client's `Authorization` header forwarded downstream, per-client consent, `redirect_uri` comparison, `scopes_supported` | reject tokens not issued for this server, per-client consent, exact `redirect_uri` match, minimal scopes (§2a) |
 | Confused deputy between MCP servers | mixing of several servers' context with no provenance marking | isolate context per server, check before an action that touches another server's data |
 | Non-human identity | whose account the agent runs under, token TTL, actor distinguishability in logs | a service identity with a narrowed scope, short-lived credentials, a separate audit log |
 | Cross-session leakage / RAG poisoning | scoping by user_id/session_id on memory and index reads, provenance of documents | per-tenant isolation on every read, an allowlist of sources before indexing |

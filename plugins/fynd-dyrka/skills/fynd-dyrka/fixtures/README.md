@@ -75,6 +75,23 @@ calls against 8.
 The price of the "reach the check's implementation" rule: 91–100k tokens and 6–9
 minutes, against 62k and 50 seconds for an agent that reads only its slice.
 
+## `supabase-rls/` — does `scan_supabase_migrations` fire, and stay quiet on clean SQL?
+
+Not a fan-out fixture: a control group for the stdlib check in `scan.py`
+(`scripts/scan.py --target fixtures/supabase-rls/bad --layers iac`). `bad/` is
+one migration with a public table and no RLS, two `USING (true)` policies (one on
+writes), a policy on `user_metadata`, a `SECURITY DEFINER` function with no
+`search_path`, and a view without `security_invoker` — **six findings**. `clean/`
+has the same shapes done right, spread over two migration files (RLS for `notes`
+is enabled in the second one), plus traps that must **not** fire: a `using (true)`
+policy restricted to `service_role`, `using (true)` and `security definer` inside
+comments, and a phrase inside a `$$` body — **zero findings**.
+
+Measurement 2026-09-29: `bad` 6, `clean` 0. Mutating `clean` (dropping the second
+migration; removing `set search_path`; removing `security_invoker`; changing the
+policy's role to `anon`) makes exactly the matching rules fire, so the zero is not
+a broken check.
+
 ## What the fixtures do not test
 
 All three are synthetic, 5–9 files each, and their territory is exhausted in two
