@@ -1,7 +1,7 @@
 {
   "name": "fynd-dyrka",
   "description": "Defensive security review of a service you own or are authorised to assess, in seven layers: source code (SAST), leaked secrets, vulnerable dependencies, container/IaC misconfiguration, live-service checks, external exposure of a running URL (publicly reachable .git and other sensitive paths, secrets left in built frontend assets, security headers/CORS/HTTP methods, a bounded crawl for input-handling weaknesses, unintentionally exposed services checked passively and via an optional active port scan, email-domain protection via SPF/DMARC, domain WHOIS expiry and reputation), an optional explicitly-authorised phishing-resilience check, and platform — the real state of the production deployment (public data-store address, runtime variables, deploy permissions, backups, drift from the repository). Wraps semgrep/gitleaks/osv-scanner/trivy and adds what scanners miss: reading code for logic flaws (authorization gaps, IDOR, SSRF, race conditions over money) verified by reproducing them, a separate pass on availability and cost (missing rate limits, unbounded queries, ReDoS, cost overruns on paid APIs) and on observability (will an incident leave a trace), and risk mapping. It also covers the agentic surface (LLM agents, MCP servers, RAG): over-broad permissions, untrusted-input handling, memory isolation. Every high-severity finding is challenged before it is reported, not only confirmed.",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "author": {
     "name": "Ivan Teresenko"
   },
