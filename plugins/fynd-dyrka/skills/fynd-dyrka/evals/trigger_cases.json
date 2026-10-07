@@ -1,0 +1,149 @@
+{
+ "_doc": "Trigger-eval описания; прогон — ~/.claude/scripts/skill_trigger_eval.py (личный раннер автора). Near-miss негативы.",
+ "competitors": [
+  "zodchiy",
+  "python-db",
+  "deploy-verify",
+  "systematic-debugging",
+  {
+   "name": "code-review",
+   "description": "Review the current diff, or a PR number/branch/path target, for correctness bugs (plus reuse/simplification/efficiency cleanups where the model's review recipe covers them) at the given effort level. Pass --comment to post findings as inline PR comments, or --fix to apply the findings to the working tree after the review."
+  },
+  {
+   "name": "security-review",
+   "description": "Complete a security review of the pending changes on the current branch"
+  }
+ ],
+ "cases": [
+  {
+   "id": "t01",
+   "split": "train",
+   "should_trigger": true,
+   "prompt": "Проверь безопасность нашего сервиса"
+  },
+  {
+   "id": "t02",
+   "split": "train",
+   "should_trigger": true,
+   "prompt": "Есть ли утёкшие ключи в репозитории?"
+  },
+  {
+   "id": "t03",
+   "split": "train",
+   "should_trigger": true,
+   "prompt": "check the security of my api before launch"
+  },
+  {
+   "id": "t04",
+   "split": "train",
+   "should_trigger": true,
+   "prompt": "Просканируй зависимости на уязвимости"
+  },
+  {
+   "id": "t05",
+   "split": "train",
+   "should_trigger": true,
+   "prompt": "Я переписал авторизацию — посмотри свежим глазом, нет ли дыр"
+  },
+  {
+   "id": "t06",
+   "split": "train",
+   "should_trigger": true,
+   "prompt": "Готов ли сервис к продакшену с точки зрения безопасности?"
+  },
+  {
+   "id": "t07",
+   "split": "test",
+   "should_trigger": true,
+   "prompt": "Может ли один пользователь прочитать чужие заказы через наш API?"
+  },
+  {
+   "id": "t08",
+   "split": "test",
+   "should_trigger": true,
+   "prompt": "Глянь перед деплоем, нет ли дыр"
+  },
+  {
+   "id": "t09",
+   "split": "test",
+   "should_trigger": true,
+   "prompt": "Проверь заголовки безопасности и CORS на нашем живом сайте"
+  },
+  {
+   "id": "t10",
+   "split": "test",
+   "should_trigger": true,
+   "prompt": "Наш LLM-агент с MCP — не слишком ли у него широкие права?"
+  },
+  {
+   "id": "n01",
+   "split": "train",
+   "should_trigger": false,
+   "prompt": "Посмотри мой дифф на баги перед коммитом",
+   "route_to": "code-review"
+  },
+  {
+   "id": "n02",
+   "split": "train",
+   "should_trigger": false,
+   "prompt": "Разбери архитектуру сервиса — где техдолг",
+   "route_to": "zodchiy"
+  },
+  {
+   "id": "n03",
+   "split": "train",
+   "should_trigger": false,
+   "prompt": "Выкатил релиз, что проверить на проде?",
+   "route_to": "deploy-verify"
+  },
+  {
+   "id": "n04",
+   "split": "train",
+   "should_trigger": false,
+   "prompt": "Тест авторизации падает через раз",
+   "route_to": "systematic-debugging"
+  },
+  {
+   "id": "n05",
+   "split": "train",
+   "should_trigger": false,
+   "prompt": "Добавь колонку в таблицу users и миграцию",
+   "route_to": "python-db"
+  },
+  {
+   "id": "n06",
+   "split": "train",
+   "should_trigger": false,
+   "prompt": "Сделай security review изменений в текущей ветке",
+   "route_to": "security-review"
+  },
+  {
+   "id": "n07",
+   "split": "test",
+   "should_trigger": false,
+   "prompt": "Страшно трогать модуль платежей — почему тут так больно менять?",
+   "route_to": "zodchiy"
+  },
+  {
+   "id": "n08",
+   "split": "test",
+   "should_trigger": false,
+   "prompt": "Отревьюй PR 42",
+   "route_to": "code-review"
+  },
+  {
+   "id": "n09",
+   "split": "test",
+   "should_trigger": false,
+   "prompt": "После деплоя выросли 500-ки, откатывать?",
+   "route_to": "deploy-verify"
+  },
+  {
+   "id": "n10",
+   "split": "test",
+   "should_trigger": false,
+   "prompt": "Запрос к базе висит на $3-параметре",
+   "route_to": "python-db"
+  }
+ ]
+}
