@@ -1,6 +1,6 @@
 ---
 name: fynd-dyrka
-description: "Defensive security review of a service you own or are authorised to assess, in seven layers: source code (SAST), leaked secrets, vulnerable dependencies, container/IaC misconfiguration, live-service checks, external exposure of a running URL (misconfigured security headers/CORS, publicly reachable sensitive paths, secrets left in built frontend assets, email-domain protection via SPF/DMARC, unintentionally exposed services), and platform — the real state of the production deployment (public data-store address, runtime variables, deploy permissions, backups, drift from the repository). Wraps semgrep/gitleaks/osv-scanner/trivy and adds what scanners miss: logic flaws (authorization gaps, IDOR, SSRF, race conditions over money) verified by reproducing them, availability and cost risks (missing rate limits, unbounded queries, ReDoS), observability gaps, and the agentic surface (LLM agents, MCP, RAG: over-broad permissions, untrusted-input handling, memory isolation). Every high-severity finding is challenged before it is reported. Use on 'check the security', 'security review', 'security audit', 'scan for vulnerabilities', 'are there any holes', 'any leaked keys', 'is this code safe', and indirect asks: 'give it a look before we deploy', 'is this ready for production', 'I rewrote authorisation — take a fresh look'."
+description: "Defensive security review of a service you own or are authorised to assess: source code, leaked secrets, dependencies, container/IaC configuration, the running service and its production deployment — including logic and authorization flaws scanners miss, and the agentic surface (LLM agents, MCP, RAG). Use on 'check the security', 'security review', 'security audit', 'scan for vulnerabilities', 'are there any holes', 'any leaked keys', 'is this code safe', and indirect asks: 'give it a look before we deploy', 'is this ready for production', 'I rewrote authorisation — take a fresh look'."
 ---
 
 # fynd-dyrka
@@ -662,64 +662,13 @@ To check your own audit, change a condition: a different model, diff mode instea
 of full, someone else's inventory as input, a swarm instead of waves.
 ### Step 8. The report
 
-The default format is **Markdown** (structure below). If the user asks for HTML or
+The default format is **Markdown**. If the user asks for HTML or
 a page, or there are many findings and navigation is needed, use
 `assets/report-template.html` (`{{...}}` placeholders, self-contained) and deliver
 the file as an artifact or through `SendUserFile`.
 
-```markdown
-# Security Scan — <target>
-
-**Date:** <ISO>  ·  **Layers:** <layers>  ·  **Risk: <GRADE>**
-
-## Summary
-<2–3 lines: the main thing found, and what to do first>
-
-| Severity | Count |
-|----------|-------|
-| CRITICAL | N |
-| HIGH     | N |
-| MEDIUM   | N |
-| LOW      | N |
-| UNKNOWN  | N |
-
-`UNKNOWN` covers findings whose severity was not recognised (a scanner changed its
-vocabulary, a custom rule). The row is mandatory even at N = 0; at N > 0 work
-through them by hand — something critical may be sitting there.
-
-## Critical — fix now
-### [CRITICAL] <title>
-- **Where:** file:line / endpoint
-- **What:** the problem and how it is exploited
-- **Proof:** run output (mandatory for logic findings)
-  ```
-  $ python3 -c "from worker.domain_guard import is_safe_url; ..."
-  http://[::ffff:169.254.169.254]/ -> True    # ← should be False
-  ```
-- **How to fix:** a concrete step
-- **Source:** manual review (Step 3) / <tool> (<identifier>)
-
-## Attack chains
-### <name>
-1. step → 2. step → 3. impact
-**Bottom line:** <what the attacker gets>
-
-## Everything else (descending)
-<HIGH/MEDIUM/LOW briefly, grouped. Unverified hypotheses are tagged
-[UNVERIFIED] with what prevented verification>
-
-## Filtered out as false or low
-<scanner findings you downgraded, plus the reason — so the user can re-check your
-triage instead of taking it on trust>
-
-## Refuted hypotheses
-<what you suspected, how you tested it, why it turned out not to be a bug — this
-shows the depth of the review and saves the user re-checking the same places>
-
-## Coverage
-<what of the attack surface was reviewed, what was not and why; skipped layers and
-scanners plus install commands where a tool was missing>
-```
+Structure: `references/report-format.md` — sections Summary (with a mandatory UNKNOWN row),
+Critical, Attack chains, Everything else, Filtered out, Refuted hypotheses, Coverage.
 
 Risk grade, roughly: any CRITICAL → F/D; only MEDIUM/LOW → C/B; clean → A.
 
