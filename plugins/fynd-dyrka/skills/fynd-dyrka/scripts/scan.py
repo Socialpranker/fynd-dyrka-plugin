@@ -2,7 +2,7 @@
 """
 fynd-dyrka security orchestrator.
 
-Runs available security scanners across four layers and emits one unified JSON
+Runs available security scanners across several layers and emits one unified JSON
 report to stdout. Designed to degrade gracefully: a missing scanner is recorded
 as "skipped", never a crash. The LLM layer (the skill) reads this JSON and does
 triage, deduplication, attack-chain reasoning, and report writing on top.
@@ -16,12 +16,22 @@ Layers:
   recon      — external recon of a live URL, no external CLI tools: exposed
                .git, secrets in prod JS, security headers / CORS, open ports &
                CVEs via Shodan InternetDB, email spoofability (SPF/DMARC)
+  platform   — the real state of the deployed service via the provider CLI
+  fuzz       — property-based fuzzing of a LOCAL service from its OpenAPI spec
+               (schemathesis); writes to the target, so it refuses every
+               non-local URL and --authorized does NOT lift that refusal
+
+Also inside the layers above: zizmor (GitHub Actions workflows) and a stdlib
+heuristic for Supabase RLS in SQL migrations run under `iac`; mobsfscan
+(Android/iOS sources) runs under `sast`.
 
 DAST/recon safety model:
   - localhost / 127.0.0.1 / *.local / private IPs are always allowed.
   - Any other (public) target requires --authorized, else active probing is
     refused. This mirrors the authorization gate FYND_DYRKA used: you may only
     actively probe a host you are allowed to test.
+  - fuzz is stricter: it writes data and can knock a service over, so it runs
+    against local targets only. --authorized does NOT lift the refusal.
   - recon splits by probe: active probes (git-exposure, js-secrets,
     security-headers) hit the target and honor the gate; passive probes
     (shodan-internetdb, email-spoofability) hit third parties / DNS, not the
@@ -31,6 +41,7 @@ Usage:
   scan.py --target . --layers sast,secrets,deps,iac
   scan.py --target . --url http://localhost:3000 --layers all
   scan.py --url https://staging.example.com --authorized --layers dast,recon
+  scan.py --url http://localhost:8000 --layers fuzz
 
 Exit code is always 0 on a completed run (findings are data, not failure);
 non-zero only on a usage/orchestration error, so CI can distinguish "scan
@@ -53,7 +64,7 @@ from typing import Any, Callable
 from urllib.parse import urlparse, urljoin, parse_qs, urlencode, quote
 from html.parser import HTMLParser
 
-ALL_LAYERS = ["sast", "secrets", "deps", "iac", "dast", "recon", "platform"]
+ALL_LAYERS = ["sast", "secrets", "deps", "iac", "dast", "recon", "platform", "fuzz"]
 
 # Vendored / generated dirs we never want to scan as "your code" — they bury
 # real findings under thousands of third-party ones (a bandit run over
@@ -181,14 +192,19 @@ def finding(
 
 
 def run_cmd(
-    cmd: list[str], timeout: int, cwd: str | None = None
+    cmd: list[str],
+    timeout: int,
+    cwd: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
+    """`env` entries are ADDED to the inherited environment, not a replacement."""
     return subprocess.run(
         cmd,
         capture_output=True,
         text=True,
         timeout=timeout,
         cwd=cwd,
+        env={**os.environ, **env} if env else None,
     )
 
 
@@ -368,6 +384,128 @@ def scan_bandit(target: str, timeout: int, raw_dir: str | None) -> ToolResult:
         r.status, r.reason = "error", f"timeout after {timeout}s"
     except json.JSONDecodeError:
         r.status, r.reason = "error", "could not parse bandit JSON"
+    except Exception as e:  # noqa: BLE001
+        r.status, r.reason = "error", str(e)[:300]
+    return r
+
+
+def _mobile_platforms(target: str) -> list[str]:
+    """Which mobile platforms have sources in the tree: 'android' (an
+    AndroidManifest.xml plus .kt/.java sources) and/or 'ios' (any .swift file or
+    an Info.plist). Vendored directories are skipped."""
+    if os.path.isfile(target):
+        return []
+    manifest = jvm = swift = plist = False
+    for _root, dirs, files in os.walk(target):
+        dirs[:] = [d for d in dirs if d not in VENDOR_DIRS]
+        for fn in files:
+            ext = os.path.splitext(fn)[1]
+            manifest = manifest or fn == "AndroidManifest.xml"
+            jvm = jvm or ext in (".kt", ".java")
+            swift = swift or ext == ".swift"
+            plist = plist or fn == "Info.plist"
+    found = []
+    if manifest and jvm:
+        found.append("android")
+    if swift or plist:
+        found.append("ios")
+    return found
+
+
+def _mobsf_config(path: str) -> str:
+    """mobsfscan config that ignores vendored directories (it does scan
+    node_modules otherwise — observed: a weak-hash finding inside
+    node_modules/x/...). Same idea as _gitleaks_config."""
+    body = "---\n- ignore-paths:\n" + "".join(f"  - {d}\n" for d in VENDOR_DIRS)
+    with open(path, "w") as f:
+        f.write(body)
+    return path
+
+
+def scan_mobsfscan(target: str, timeout: int, raw_dir: str | None) -> ToolResult:
+    """Static scan of Android/iOS sources (Java/Kotlin, AndroidManifest.xml,
+    Swift, Info.plist). Static only: what the app stores at runtime, what an SDK
+    sends over the wire and whether pinning can be bypassed need a device and
+    manual dynamic testing (references/mobile.md)."""
+    r = ToolResult(tool="mobsfscan", layer="sast", status="skipped")
+    if not have("mobsfscan"):
+        r.reason = "mobsfscan not installed (pip install mobsfscan)"
+        return r
+    if not os.path.exists(target):
+        # mobsfscan on a missing path prints an empty result and exits 0 — a
+        # silent zero, indistinguishable from "clean".
+        r.status, r.reason = "error", f"target does not exist: {target}"
+        return r
+    platforms = _mobile_platforms(target)
+    if not platforms:
+        r.reason = (
+            "no Android (AndroidManifest.xml + .kt/.java) or iOS (.swift / "
+            "Info.plist) sources in target"
+        )
+        return r
+    t0 = time.time()
+    cfg = _mobsf_config(
+        os.path.join(raw_dir, "mobsfscan.yml") if raw_dir else _tmp("mobsfscan.yml")
+    )
+    try:
+        # --no-fail: exit 0 even with findings, so any non-zero code below is a
+        # real failure of the tool rather than "issues were found".
+        proc = run_cmd(
+            ["mobsfscan", "--json", "--no-fail", "-c", cfg, target], timeout=timeout
+        )
+        r.duration_s = round(time.time() - t0, 1)
+        if proc.returncode != 0:
+            err = (proc.stderr or proc.stdout or "").strip()
+            r.status, r.reason = "error", (err or f"exit {proc.returncode}")[:300]
+            return r
+        data = json.loads(proc.stdout or "{}")
+        r.raw_available = _dump_raw(raw_dir, "mobsfscan", proc.stdout)
+        for rule_id, res in (data.get("results") or {}).items():
+            meta = res.get("metadata", {})
+            sev = {"ERROR": "HIGH", "WARNING": "MEDIUM"}.get(
+                str(meta.get("severity", "")).upper(), meta.get("severity", "INFO")
+            )
+            desc = (
+                f"{meta.get('cwe', '')}; MASVS {meta.get('masvs', '')}; "
+                f"{meta.get('description', '')}"
+            )
+            files = res.get("files") or []
+            if not files:
+                # Absence-type rule (no pinning / root detection ...): no file.
+                files = [{"file_path": target}]
+            for fi in files:
+                where = fi.get("file_path", "")
+                lines = fi.get("match_lines") or []
+                # mobsfscan reports line 1 for XML/plist matches regardless of
+                # position (observed on AndroidManifest.xml), so cite a line only
+                # for source files.
+                if lines and not where.endswith((".xml", ".plist")):
+                    where = f"{where}:{lines[0]}"
+                r.findings.append(
+                    finding(
+                        severity=sev,
+                        title=f"{rule_id}: {meta.get('description', '')}",
+                        location=where,
+                        identifier=rule_id,
+                        description=desc,
+                        tool="mobsfscan",
+                    )
+                )
+        _errs = scanner_errors(data)
+        if _errs and not r.findings:
+            r.status, r.reason = "error", "; ".join(_errs)[:300]
+        else:
+            r.status = "ok"
+            r.reason = (
+                f"static only ({', '.join(platforms)}); runtime storage, traffic "
+                "and pinning bypass require manual dynamic testing"
+            )
+            if _errs:
+                r.reason = "partial: " + "; ".join(_errs)[:200]
+    except subprocess.TimeoutExpired:
+        r.status, r.reason = "error", f"timeout after {timeout}s"
+    except json.JSONDecodeError:
+        r.status, r.reason = "error", "could not parse mobsfscan JSON"
     except Exception as e:  # noqa: BLE001
         r.status, r.reason = "error", str(e)[:300]
     return r
@@ -764,6 +902,442 @@ def scan_hadolint(target: str, timeout: int, raw_dir: str | None) -> ToolResult:
     return r
 
 
+def scan_zizmor(target: str, timeout: int, raw_dir: str | None) -> ToolResult:
+    """GitHub Actions workflow audit (template injection, dangerous triggers,
+    excessive permissions, unpinned actions ...).
+
+    ALWAYS offline. zizmor switches to online audits on its own when GH_TOKEN /
+    GITHUB_TOKEN / ZIZMOR_GITHUB_TOKEN is in the environment — and a developer
+    machine usually has one. Both `--offline` and ZIZMOR_OFFLINE=1 are set, so
+    the run is reproducible and makes no GitHub API calls. Cost: the online-only
+    audits (impostor-commit, known-vulnerable-actions, ref-confusion,
+    stale-action-refs) do not run.
+    """
+    r = ToolResult(tool="zizmor", layer="iac", status="skipped")
+    wf_dir = os.path.join(target, ".github", "workflows")
+    if not os.path.isdir(wf_dir) or not any(
+        fn.endswith((".yml", ".yaml")) for fn in os.listdir(wf_dir)
+    ):
+        r.reason = "no .github/workflows/*.yml in target"
+        return r
+    if not have("zizmor"):
+        r.reason = "zizmor not installed (pip install zizmor / brew install zizmor)"
+        return r
+    t0 = time.time()
+    try:
+        proc = run_cmd(
+            ["zizmor", "--offline", "--format=json", wf_dir],
+            timeout=timeout,
+            env={"ZIZMOR_OFFLINE": "1"},
+        )
+        r.duration_s = round(time.time() - t0, 1)
+        # Exit codes: 0 = no findings, 11-14 = findings by severity; anything else
+        # (1, 3 ...) means zizmor itself failed and stdout is not a result.
+        if proc.returncode not in (0, 11, 12, 13, 14):
+            # drop zizmor's INFO log lines so the real error is what is left
+            err = "\n".join(
+                ln
+                for ln in (proc.stderr or proc.stdout or "").splitlines()
+                if ln.strip() and not ln.lstrip().startswith("INFO")
+            )
+            r.status, r.reason = "error", (err or f"exit {proc.returncode}")[:300]
+            return r
+        data = json.loads(proc.stdout or "[]")
+        r.raw_available = _dump_raw(raw_dir, "zizmor", proc.stdout)
+        sev_map = {
+            "informational": "INFO",
+            "low": "LOW",
+            "medium": "MEDIUM",
+            "high": "HIGH",
+        }
+        for item in data:
+            if item.get("ignored"):
+                continue
+            det = item.get("determinations", {})
+            locs = item.get("locations", [])
+            loc = next(
+                (x for x in locs if x.get("symbolic", {}).get("kind") == "Primary"),
+                locs[0] if locs else {},
+            )
+            sym = loc.get("symbolic", {})
+            path = (sym.get("key", {}).get("Local", {}) or {}).get("verbatim_path", "")
+            row = (
+                loc.get("concrete", {})
+                .get("location", {})
+                .get("start_point", {})
+                .get("row")
+            )
+            where = f"{path}:{row + 1}" if isinstance(row, int) else path
+            r.findings.append(
+                finding(
+                    severity=sev_map.get(
+                        str(det.get("severity", "")).lower(), "UNKNOWN"
+                    ),
+                    title=item.get("desc", item.get("ident", "zizmor finding")),
+                    location=where,
+                    identifier=item.get("ident", ""),
+                    description=(
+                        f"{sym.get('annotation', '')} "
+                        f"(confidence {det.get('confidence', '?')}, "
+                        f"persona {det.get('persona', '?')}); {item.get('url', '')}"
+                    ),
+                    tool="zizmor",
+                )
+            )
+        r.status = "ok"
+        r.reason = (
+            "offline: online-only audits (impostor-commit, known-vulnerable-actions, "
+            "ref-confusion, stale-action-refs) not run"
+        )
+    except subprocess.TimeoutExpired:
+        r.status, r.reason = "error", f"timeout after {timeout}s"
+    except json.JSONDecodeError:
+        r.status, r.reason = "error", "could not parse zizmor JSON"
+    except Exception as e:  # noqa: BLE001
+        r.status, r.reason = "error", str(e)[:300]
+    return r
+
+
+# --------------------------------------------------------------------------- #
+# Supabase RLS heuristics over SQL migrations (stdlib only)
+#
+# Mirrors a subset of the Supabase database linter (rule ids in `identifier`),
+# but from *.sql files rather than a live database. A migration is not the
+# state of production: dashboard edits and drift are invisible here, so every
+# finding is a candidate to verify against the live DB (references/
+# baas-and-artifacts.md). Statement splitting is a small tokenizer, not a full
+# SQL parser: it understands comments, '...' strings and $tag$...$tag$ bodies.
+# --------------------------------------------------------------------------- #
+
+
+def _sql_statements(text: str) -> list[tuple[int, str, str]]:
+    """Split SQL into (start_line, raw, code) statements.
+
+    raw  = comments blanked, strings and dollar-quoted bodies kept;
+    code = raw with dollar-quoted bodies blanked too (so `security definer`
+           inside a function body is not mistaken for a function attribute).
+    """
+    dollar_tag = _re.compile(r"\$[A-Za-z_]*\$")
+
+    def blank(seg: str) -> str:
+        return "".join(c if c == "\n" else " " for c in seg)
+
+    out: list[tuple[int, str, str]] = []
+    raw: list[str] = []
+    code: list[str] = []
+    line = 1
+    start: int | None = None
+    i, n = 0, len(text)
+
+    def flush() -> None:
+        nonlocal start
+        if "".join(code).strip():
+            out.append((start or line, "".join(raw), "".join(code)))
+        raw.clear()
+        code.clear()
+        start = None
+
+    while i < n:
+        ch = text[i]
+        two = text[i : i + 2]
+        if two == "--":
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+            raw.append(blank(text[i:j]))
+            code.append(blank(text[i:j]))
+            i = j
+            continue
+        if two == "/*":
+            j = text.find("*/", i + 2)
+            j = n if j < 0 else j + 2
+            seg = text[i:j]
+            raw.append(blank(seg))
+            code.append(blank(seg))
+            line += seg.count("\n")
+            i = j
+            continue
+        if ch == "'":
+            j = i + 1
+            while j < n:
+                if text[j] == "'":
+                    if text[j + 1 : j + 2] == "'":
+                        j += 2
+                        continue
+                    break
+                j += 1
+            seg = text[i : j + 1]
+            if start is None:
+                start = line
+            raw.append(seg)
+            code.append(seg)
+            line += seg.count("\n")
+            i = j + 1
+            continue
+        if ch == "$":
+            m = dollar_tag.match(text, i)
+            if m:
+                tag = m.group(0)
+                j = text.find(tag, m.end())
+                j = n if j < 0 else j + len(tag)
+                seg = text[i:j]
+                if start is None:
+                    start = line
+                raw.append(seg)
+                code.append(blank(seg))
+                line += seg.count("\n")
+                i = j
+                continue
+        if ch == ";":
+            flush()
+            i += 1
+            continue
+        if not ch.isspace() and start is None:
+            start = line
+        if ch == "\n":
+            line += 1
+        raw.append(ch)
+        code.append(ch)
+        i += 1
+    flush()
+    return out
+
+
+def _find_sql_migrations(target: str) -> list[str]:
+    """*.sql files under a `migrations` or `supabase` directory, in path order
+    (migration filenames sort by timestamp, which is their apply order)."""
+    found = []
+    for root, dirs, files in os.walk(target):
+        dirs[:] = [d for d in dirs if d not in VENDOR_DIRS]
+        parts = os.path.relpath(root, target).split(os.sep)
+        if "migrations" in parts or "supabase" in parts:
+            found += [os.path.join(root, f) for f in files if f.endswith(".sql")]
+    return sorted(found)
+
+
+def scan_supabase_migrations(
+    target: str, timeout: int, raw_dir: str | None
+) -> ToolResult:
+    r = ToolResult(tool="supabase-migrations", layer="iac", status="skipped")
+    files = _find_sql_migrations(target)
+    if not files:
+        r.reason = "no *.sql under a migrations/ or supabase/ directory"
+        return r
+    t0 = time.time()
+    try:
+        name = r'(?:"?(\w+)"?\s*\.\s*)?"?(\w+)"?'
+        re_create_table = _re.compile(
+            r"^create (?:unlogged )?table (?:if not exists )?" + name
+        )
+        re_drop_table = _re.compile(r"^drop table (?:if exists )?" + name)
+        re_alter_table = _re.compile(
+            r"^alter table (?:if exists )?(?:only )?" + name + r"(.*)$"
+        )
+        re_policy = _re.compile(r'^create policy ("[^"]+"|\w+) on ' + name + r"(.*)$")
+        re_drop_policy = _re.compile(
+            r'^drop policy (?:if exists )?("[^"]+"|\w+) on ' + name
+        )
+        re_function = _re.compile(
+            r"^create (?:or replace )?function " + name + r"\s*\("
+        )
+        re_alter_function = _re.compile(
+            r"^alter function " + name + r"\s*\(.*\bset search_path\b"
+        )
+        re_view = _re.compile(
+            r"^create (?:or replace )?(?:temp |temporary |recursive )?view " + name
+        )
+        re_alter_view = _re.compile(
+            r"^alter view (?:if exists )?" + name + r" set \(.*security_invoker"
+        )
+        invoker_on = _re.compile(r"security_invoker\s*=?\s*(true|on|1)\b")
+
+        def public(m: Any, i: int = 1) -> str | None:
+            """Table/function name when unqualified or in public, else None."""
+            schema, obj = m.group(i), m.group(i + 1)
+            return obj if schema in (None, "public") else None
+
+        tables: dict[str, str] = {}  # created public tables -> "file:line"
+        rls: dict[str, bool] = {}  # last ENABLE/DISABLE ROW LEVEL SECURITY seen
+        policies: dict[tuple[str, str], dict[str, Any]] = {}
+        definers: dict[str, dict[str, Any]] = {}
+        sp_fixed: set[str] = set()
+        views: dict[str, dict[str, Any]] = {}
+        invoker_fixed: set[str] = set()
+
+        for path in files:
+            rel = os.path.relpath(path, target)
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+            for line, raw_stmt, code_stmt in _sql_statements(text):
+                norm = _re.sub(r"\s+", " ", code_stmt.lower()).strip()
+                where = f"{rel}:{line}"
+                if m := re_create_table.match(norm):
+                    if (t := public(m)) is not None:
+                        tables[t] = where
+                        rls.pop(t, None)
+                elif m := re_drop_table.match(norm):
+                    if (t := public(m)) is not None:
+                        tables.pop(t, None)
+                        rls.pop(t, None)
+                elif m := re_alter_table.match(norm):
+                    if (t := public(m)) is not None:
+                        rest = m.group(3)
+                        if "enable row level security" in rest:
+                            rls[t] = True
+                        if "disable row level security" in rest:
+                            rls[t] = False
+                elif m := re_policy.match(norm):
+                    if (t := public(m, 2)) is not None:
+                        rest = m.group(4)
+                        cmd = _re.search(
+                            r"\bfor (all|select|insert|update|delete)\b", rest
+                        )
+                        roles_m = _re.search(
+                            r"\bto ([a-z_, \"]+?)(?= using| with check|$)", rest
+                        )
+                        roles = (
+                            {x.strip(' "') for x in roles_m.group(1).split(",")}
+                            if roles_m
+                            else set()
+                        )
+                        policies[(t, m.group(1))] = {
+                            "where": where,
+                            "cmd": cmd.group(1) if cmd else "all",
+                            "roles": roles,
+                            "using_true": bool(
+                                _re.search(r"\busing \( ?true ?\)", rest)
+                            ),
+                            "check_true": bool(
+                                _re.search(r"\bwith check \( ?true ?\)", rest)
+                            ),
+                            "user_metadata": "user_metadata" in raw_stmt.lower(),
+                        }
+                elif m := re_drop_policy.match(norm):
+                    if (t := public(m, 2)) is not None:
+                        policies.pop((t, m.group(1)), None)
+                elif m := re_function.match(norm):
+                    if (fn := public(m)) is not None:
+                        definers[fn] = {
+                            "where": where,
+                            "definer": bool(_re.search(r"\bsecurity definer\b", norm)),
+                            "search_path": bool(
+                                _re.search(r"\bset search_path\b", norm)
+                            ),
+                        }
+                elif m := re_alter_function.match(norm):
+                    if (fn := public(m)) is not None:
+                        sp_fixed.add(fn)
+                elif m := re_view.match(norm):
+                    if (v := public(m)) is not None:
+                        views[v] = {
+                            "where": where,
+                            "invoker": bool(invoker_on.search(norm)),
+                        }
+                elif m := re_alter_view.match(norm):
+                    if (v := public(m)) is not None and invoker_on.search(norm):
+                        invoker_fixed.add(v)
+
+        note = "heuristic candidate, verify against the live DB (migrations are not prod state)"
+
+        def add(sev: str, title: str, where: str, ident: str, why: str) -> None:
+            r.findings.append(
+                finding(
+                    severity=sev,
+                    title=title,
+                    location=where,
+                    identifier=ident,
+                    description=f"{why} — {note}.",
+                    tool="supabase-migrations",
+                )
+            )
+
+        for t, where in tables.items():
+            if not rls.get(t):
+                n_pol = sum(1 for (pt, _pn) in policies if pt == t)
+                add(
+                    "HIGH",
+                    f"public.{t}: no ENABLE ROW LEVEL SECURITY in any migration",
+                    where,
+                    "0013_rls_disabled_in_public",
+                    "table in the exposed public schema without RLS"
+                    + (
+                        f" ({n_pol} polic(y/ies) defined but inactive, lint 0007)"
+                        if n_pol
+                        else ""
+                    ),
+                )
+        for (t, pname), p in policies.items():
+            if t not in tables and not rls.get(t):
+                add(
+                    "HIGH",
+                    f"policy {pname} on public.{t} while RLS is not enabled",
+                    p["where"],
+                    "0007_policy_exists_rls_disabled",
+                    "policy exists but no migration enables RLS on the table",
+                )
+            exposed = not p["roles"] or p["roles"] & {"anon", "authenticated", "public"}
+            if exposed and (p["using_true"] or p["check_true"]):
+                write = p["check_true"] or p["cmd"] != "select"
+                add(
+                    "HIGH" if write else "MEDIUM",
+                    f"policy {pname} on public.{t}: "
+                    + (
+                        "WITH CHECK/USING (true) on writes"
+                        if write
+                        else "USING (true) on SELECT"
+                    ),
+                    p["where"],
+                    "0024_permissive_rls_policy",
+                    "any anon/authenticated caller passes the policy"
+                    + (
+                        ""
+                        if write
+                        else "; fine only if the table is intentionally public"
+                    ),
+                )
+            if p["user_metadata"]:
+                add(
+                    "HIGH",
+                    f"policy {pname} on public.{t} references user_metadata",
+                    p["where"],
+                    "0015_rls_references_user_metadata",
+                    "authorisation decided by user_metadata: check that an end user "
+                    "cannot set that claim",
+                )
+        for fn, d in definers.items():
+            if d["definer"] and not d["search_path"] and fn not in sp_fixed:
+                add(
+                    "MEDIUM",
+                    f"public.{fn}(): SECURITY DEFINER without a fixed search_path",
+                    d["where"],
+                    "0011_function_search_path_mutable",
+                    "runs with the owner's privileges and resolves names through the "
+                    "caller's search_path; also check who may EXECUTE it (lints 0028/0029)",
+                )
+        for v, d in views.items():
+            if not d["invoker"] and v not in invoker_fixed:
+                add(
+                    "MEDIUM",
+                    f"public.{v}: view without security_invoker",
+                    d["where"],
+                    "0010_security_definer_view",
+                    "a view runs with its owner's privileges unless security_invoker "
+                    "is on (PG 15+), so RLS of the underlying tables may be bypassed",
+                )
+        r.status = "ok"
+        r.reason = f"{len(files)} SQL file(s) read; static heuristic, not the live DB"
+        r.duration_s = round(time.time() - t0, 1)
+        r.raw_available = _dump_raw(
+            raw_dir,
+            "supabase-migrations",
+            json.dumps({"files": [os.path.relpath(f, target) for f in files]}),
+        )
+    except OSError as e:
+        r.status, r.reason = "error", str(e)[:300]
+    except Exception as e:  # noqa: BLE001
+        r.status, r.reason = "error", str(e)[:300]
+    return r
+
+
 # --------------------------------------------------------------------------- #
 # DAST
 # --------------------------------------------------------------------------- #
@@ -866,6 +1440,189 @@ def scan_nuclei(
         r.status, r.reason = "error", f"timeout after {timeout}s"
     except Exception as e:  # noqa: BLE001
         r.status, r.reason = "error", str(e)[:300]
+    return r
+
+
+# --------------------------------------------------------------------------- #
+# Fuzz (property-based API testing — LOCAL targets only)
+#
+# Schemathesis generates requests from the service's OpenAPI spec and reports
+# what breaks (here: 5xx on generated input). Unlike dast/recon this layer WRITES
+# data (POST/PUT/DELETE with generated bodies), can fill a database and can take
+# a service down, so the gate is stricter than the one in Step 4: only
+# is_local_target(url), and --authorized deliberately does not lift it. Point it
+# at a copy of the database with outbound calls mocked (references/fuzzing.md).
+# --------------------------------------------------------------------------- #
+
+# Where a spec is usually served; FastAPI serves /openapi.json by default.
+_OPENAPI_PATHS = [
+    "/openapi.json",
+    "/swagger.json",
+    "/openapi.yaml",
+    "/api/openapi.json",
+    "/v3/api-docs",
+]
+
+
+def _find_openapi_url(url: str, timeout: int) -> str | None:
+    """The spec URL: --url itself when it points at a spec file, otherwise the
+    first common path that answers 200 with something that looks like a spec."""
+    path = urlparse(url).path.lower()
+    if path.endswith((".json", ".yaml", ".yml")):
+        return url
+    base = _base_url(url)
+    for p in _OPENAPI_PATHS:
+        status, _hdr, body = _http_get(base + p, timeout, max_bytes=4096)
+        head = body[:4096].decode("utf-8", "replace").lower()
+        if status == 200 and (
+            '"openapi"' in head or '"swagger"' in head or "openapi:" in head
+        ):
+            return base + p
+    return None
+
+
+def scan_schemathesis(url: str, timeout: int, raw_dir: str | None) -> ToolResult:
+    r = ToolResult(tool="schemathesis", layer="fuzz", status="skipped")
+    if not is_local_target(url):
+        # Not gated by --authorized on purpose: see the section comment above.
+        r.reason = (
+            f"refusing to fuzz non-local target {url}: fuzzing writes data and can "
+            "take the service down, so this layer runs only against localhost / "
+            "private addresses. --authorized does NOT lift this refusal."
+        )
+        return r
+    if not have("schemathesis"):
+        r.reason = (
+            "schemathesis not installed (uv tool install schemathesis / "
+            "pip install schemathesis)"
+        )
+        return r
+    spec = _find_openapi_url(url, min(timeout, 15))
+    if not spec:
+        r.reason = (
+            "no OpenAPI spec found at "
+            + ", ".join(_OPENAPI_PATHS)
+            + f" under {_base_url(url)} (pass --url pointing at the spec file)"
+        )
+        return r
+    import tempfile
+
+    t0 = time.time()
+    # Own cwd: schemathesis/hypothesis create .hypothesis/ and .schemathesis/ in
+    # the working directory, which must not be the user's project.
+    work = tempfile.mkdtemp(prefix="secscan_fuzz_")
+    report_path = os.path.join(work, "report.json")
+    try:
+        proc = run_cmd(
+            [
+                "schemathesis",
+                "run",
+                spec,
+                # The spec may name a different host in `servers`; requests must
+                # go to the (verified local) target only.
+                "--origin",
+                _base_url(url),
+                "-w",
+                "1",
+                "--rate-limit",
+                "10/s",
+                "-n",
+                "100",
+                "-c",
+                "not_a_server_error",
+                "--request-timeout",
+                "10",
+                "--report",
+                "json",
+                "--report-json-path",
+                report_path,
+            ],
+            timeout=timeout,
+            cwd=work,
+        )
+        r.duration_s = round(time.time() - t0, 1)
+        r.raw_available = _dump_raw(raw_dir, "schemathesis", proc.stdout)
+        if not os.path.exists(report_path):
+            # Exit 1 is used both for "failures found" and for "could not load
+            # the schema"; only the report file tells them apart.
+            err = (proc.stdout or proc.stderr or "").strip().splitlines()
+            r.status, r.reason = (
+                "error",
+                (
+                    f"schemathesis produced no report (exit {proc.returncode}): "
+                    + " | ".join(x.strip() for x in err[-4:] if x.strip())
+                )[:300],
+            )
+            return r
+        with open(report_path) as fh:
+            data = json.load(fh)
+        # First "Reproduce with" curl per operation, from the console output
+        # (the JSON report carries failure summaries without the request).
+        repro: dict[str, str] = {}
+        cur = None
+        for ln in (proc.stdout or "").splitlines():
+            head = _re.match(r"^_{3,} (.+?) _{3,}$", ln.strip())
+            if head:
+                cur = head.group(1)
+            elif cur and ln.strip().startswith("curl ") and cur not in repro:
+                repro[cur] = ln.strip()
+        for f in data.get("failures", []):
+            ident = {"ServerError": "not_a_server_error"}.get(
+                f.get("type", ""), f.get("type", "schemathesis")
+            )
+            for op in f.get("operations", []) or [""]:
+                r.findings.append(
+                    finding(
+                        severity="MEDIUM",  # 5xx on generated input; HIGH is a triage call
+                        title=f"{op}: {f.get('title', 'failure')} on generated input ({ident})",
+                        location=op,
+                        identifier=ident,
+                        description=(
+                            (f"Reproducer: {repro[op]}. " if op in repro else "")
+                            + "Generated input reaches an unhandled error path; "
+                            "confirm with a PoC and a control before reporting."
+                        ),
+                        tool="schemathesis",
+                    )
+                )
+        # errors[] entries are dicts like {"title": "Network Error", "count": 1}
+        errs = [
+            (
+                f"{e.get('title', 'error')} x{e.get('count', 1)}"
+                if isinstance(e, dict)
+                else str(e)[:120]
+            )
+            for e in data.get("errors", [])
+        ]
+        if not data.get("complete", False):
+            tail = " | ".join(
+                x.strip() for x in (proc.stdout or "").splitlines()[-6:] if x.strip()
+            )
+            r.status, r.reason = (
+                "error",
+                f"run did not complete (stop_reason={data.get('stop_reason')}): {tail}"[
+                    :300
+                ],
+            )
+        elif errs and not r.findings:
+            r.status, r.reason = "error", "; ".join(errs)[:300]
+        else:
+            r.status = "ok"
+            r.reason = (
+                f"local target; spec {spec}; "
+                f"{data.get('test_cases', {}).get('generated', '?')} cases, "
+                "check not_a_server_error only, -w 1, 10 req/s"
+            )
+            if errs:
+                r.reason = "partial: " + "; ".join(errs)[:200]
+    except subprocess.TimeoutExpired:
+        r.status, r.reason = "error", f"timeout after {timeout}s"
+    except json.JSONDecodeError:
+        r.status, r.reason = "error", "could not parse schemathesis JSON report"
+    except Exception as e:  # noqa: BLE001
+        r.status, r.reason = "error", str(e)[:300]
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
     return r
 
 
@@ -1864,10 +2621,19 @@ def _find_dockerfiles(target: str) -> list[str]:
 
 # Registry: layer -> ordered list of scanner callables.
 # Each callable takes (target_or_url, timeout, raw_dir) — dast differs, handled inline.
-SAST_SCANNERS: list[Callable] = [scan_semgrep, scan_bandit]
+SAST_SCANNERS: list[Callable] = [scan_semgrep, scan_bandit, scan_mobsfscan]
 SECRETS_SCANNERS: list[Callable] = [scan_gitleaks]
 DEPS_SCANNERS: list[Callable] = [scan_osv, scan_trivy_fs]
-IAC_SCANNERS: list[Callable] = [scan_trivy_config, scan_hadolint]
+IAC_SCANNERS: list[Callable] = [
+    scan_trivy_config,
+    scan_hadolint,
+    scan_zizmor,
+    scan_supabase_migrations,
+]
+
+# Fuzz: LOCAL targets only; each callable takes (url, timeout, raw_dir) and does
+# its own gating (see the Fuzz section).
+FUZZ_SCANNERS: list[Callable] = [scan_schemathesis]
 
 # Platform: the actual state of the DEPLOYED service through the provider CLI.
 # Reads configuration and changes nothing. Needs no --authorized gate: the CLI
@@ -2546,16 +3312,22 @@ RECON_PASSIVE_SCANNERS: list[Callable] = [
 def main() -> int:
     ap = argparse.ArgumentParser(description="Unified security scan orchestrator")
     ap.add_argument("--target", default=".", help="path to source tree (default: .)")
-    ap.add_argument("--url", default=None, help="live URL for dast/recon layers")
+    ap.add_argument("--url", default=None, help="live URL for dast/recon/fuzz layers")
     ap.add_argument(
         "--layers",
         default="sast,secrets,deps,iac",
-        help="comma list: sast,secrets,deps,iac,dast,recon,platform or 'all'",
+        help=(
+            "comma list: sast,secrets,deps,iac,dast,recon,platform,fuzz or 'all' "
+            "(note: 'all' includes fuzz, which WRITES to a local --url target)"
+        ),
     )
     ap.add_argument(
         "--authorized",
         action="store_true",
-        help="permit active dast/recon probing against a non-local target",
+        help=(
+            "permit active dast/recon probing against a non-local target "
+            "(does NOT apply to fuzz: it only ever runs against local targets)"
+        ),
     )
     ap.add_argument("--timeout", type=int, default=300, help="per-tool timeout seconds")
     ap.add_argument(
@@ -2605,6 +3377,10 @@ def main() -> int:
     if "recon" in layers and not args.url:
         report.notes.append("recon layer requested but no --url given; skipped")
         layers = [ly for ly in layers if ly != "recon"]
+
+    if "fuzz" in layers and not args.url:
+        report.notes.append("fuzz layer requested but no --url given; skipped")
+        layers = [ly for ly in layers if ly != "fuzz"]
 
     # Incremental mode: sast/secrets run over a slice tree of changed files.
     # deps/iac/dast stay full — a lock file, a Dockerfile and a live service are
@@ -2675,6 +3451,12 @@ def main() -> int:
             report.tools.append(
                 scan_nuclei(args.url, args.timeout, args.authorized, args.raw_dir)
             )
+        elif layer == "fuzz":
+            # Own gate inside the scanner: local targets only, --authorized is
+            # deliberately not passed (fuzzing writes data and can take the
+            # service down).
+            for fn in FUZZ_SCANNERS:
+                report.tools.append(fn(args.url, args.timeout, args.raw_dir))
         elif layer == "recon":
             # Passive probes always run (they hit Shodan/DNS, not the target).
             for fn in RECON_PASSIVE_SCANNERS:

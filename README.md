@@ -2,7 +2,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Claude Code plugin](https://img.shields.io/badge/Claude%20Code-plugin-6e56cf)](https://docs.claude.com/en/docs/claude-code/plugins)
-[![Version](https://img.shields.io/badge/version-1.2.0-green.svg)](.claude-plugin/marketplace.json)
+[![Version](https://img.shields.io/badge/version-1.4.0-green.svg)](.claude-plugin/marketplace.json)
 [![Layers](https://img.shields.io/badge/layers-7-orange.svg)](#layers)
 
 A seven-layer security audit — a plugin skill for [Claude Code](https://claude.ai/code).
@@ -18,13 +18,14 @@ to refute it.
 
 | Layer | What it checks | With | Requires |
 |---|---|---|---|
-| `sast` | vulnerabilities in source code | semgrep (plus custom rules), bandit | a repository |
+| `sast` | vulnerabilities in source code | semgrep (plus custom rules), bandit, mobsfscan (mobile sources only) | a repository |
 | `secrets` | leaked keys in code and git history | gitleaks | a repository |
 | `deps` | vulnerable dependencies (CVEs) | osv-scanner, trivy fs | lock files |
-| `iac` | Dockerfile / IaC / container misconfiguration | trivy config, hadolint | manifests |
+| `iac` | Dockerfile / IaC / container misconfiguration, GitHub Actions workflows, Supabase RLS in SQL migrations | trivy config, hadolint, zizmor, a stdlib migrations heuristic | manifests, workflows, `*.sql` |
 | `dast` | active probing of a live service | nuclei | a running URL |
 | `recon` | external recon: exposed `.git`, secrets in production JS, headers/CORS, Shodan, SPF/DMARC | stdlib, no external tools | a URL |
 | `platform` | the real state of production: public database address, runtime variables, config drift from the repository | Railway automatically, others manually | platform access |
+| `fuzz` | opt-in: property-based fuzzing of a **local** service from its OpenAPI spec | schemathesis | a local service with a spec |
 
 The first four read code on disk — that is, the *intent*. `dast` and `recon` hit
 the running service; `platform` looks at the deployment. They diverge constantly:
@@ -99,6 +100,9 @@ python3 .../scan.py --target . --layers sast,secrets --diff main
 
 ## Authorisation for active scanning
 
+`fuzz` is stricter: it writes data, so it refuses every non-local URL and
+`--authorized` does not lift that.
+
 `dast` sends real payloads at the target. Against localhost and private addresses,
 freely. **Against any public domain, only after explicit confirmation that you
 have the right to test that target.** The `--authorized` flag is not a technical
@@ -116,6 +120,9 @@ sessions, JWT, password storage, randomness, crypto misuse, WebSocket) ·
 `availability.md` (DoS, ReDoS, cost-DoS) · `playbooks.md` (8 attack scenarios plus
 a business-logic checklist) · `platform.md` (Railway/Vercel/Fly/Heroku/k8s/AWS/GCP)
 · `agentic.md` (LLM agents, MCP, RAG) · `bots.md` (Telegram/Discord, Mini Apps) ·
+`fuzzing.md` (boundary values, parser/transport divergence) · `mobile.md` (Android/iOS,
+analytics SDKs) · `baas-and-artifacts.md` (Supabase/Firebase rules, source maps, image
+layers) ·
 `attack-chains.md` · `mitre-map.md` · `triage.md` · `coverage-check.md` ·
 `fanout.md` (parallel agents) · `scanners.md`.
 
