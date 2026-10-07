@@ -1,6 +1,6 @@
 ---
 name: fynd-dyrka
-description: "Security review in seven layers: SAST, secrets, dependencies, IaC, DAST, external recon of a live service (exposed .git, secrets in production JS, security headers/CORS, open ports and CVEs via Shodan, mail spoofability via SPF/DMARC), and platform — the real state of the production deployment (public database address, runtime variables, deploy permissions, backups, config drift from the repository). Orchestrates semgrep/gitleaks/osv-scanner/trivy/nuclei and does what scanners cannot: logic flaws (auth bypass, IDOR, SSRF, races over money) confirmed by running them, availability and cost (missing rate limits, unbounded queries, ReDoS, cost-DoS), observability, MITRE mapping, attack chains, and the agentic surface (LLM agents, MCP, RAG: excessive agency, tool poisoning, memory isolation, prompt injection). Every HIGH/CRITICAL finding is put through an attempt to refute it. Use on 'check the security', 'security review', 'security audit', 'scan for vulnerabilities', 'are there any holes', 'pentest', 'any leaked keys', 'is this code safe', and on indirect asks: 'give it a look before we deploy', 'is this ready for production', 'I rewrote authorisation — take a fresh look'."
+description: "Defensive security review of a service you own or are authorised to assess, in seven layers: source code (SAST), leaked secrets, vulnerable dependencies, container/IaC misconfiguration, live-service checks, external exposure of a running URL (misconfigured security headers/CORS, publicly reachable sensitive paths, secrets left in built frontend assets, email-domain protection via SPF/DMARC, unintentionally exposed services), and platform — the real state of the production deployment (public data-store address, runtime variables, deploy permissions, backups, drift from the repository). Wraps semgrep/gitleaks/osv-scanner/trivy and adds what scanners miss: logic flaws (authorization gaps, IDOR, SSRF, race conditions over money) verified by reproducing them, availability and cost risks (missing rate limits, unbounded queries, ReDoS), observability gaps, and the agentic surface (LLM agents, MCP, RAG: over-broad permissions, untrusted-input handling, memory isolation). Every high-severity finding is challenged before it is reported. Use on 'check the security', 'security review', 'security audit', 'scan for vulnerabilities', 'are there any holes', 'any leaked keys', 'is this code safe', and indirect asks: 'give it a look before we deploy', 'is this ready for production', 'I rewrote authorisation — take a fresh look'."
 ---
 
 # fynd-dyrka
@@ -31,17 +31,17 @@ entirely yours.
 | `secrets` | Leaked keys and tokens (in code and git history) | gitleaks | a repository |
 | `deps` | Vulnerable dependencies (CVEs) | osv-scanner, trivy fs | lock files |
 | `iac` | Dockerfile / IaC / container misconfiguration | trivy config, hadolint | Dockerfile/manifests |
-| `dast` | Active probing of a **live** service, "as an attack" | nuclei | a running URL |
-| `recon` | External recon of a live URL: exposed `.git` and other sensitive paths, secrets in production JS, security headers/CORS/unsafe HTTP methods, a bounded same-origin crawl for reflected-XSS and SQLi candidates, open ports (Shodan passively, nmap actively on a curated list), mail spoofability, domain WHOIS expiry and VirusTotal reputation | stdlib; nmap optional for the active port check | a running URL |
+| `dast` | Active checks against a **live** service you control | nuclei | a running URL |
+| `recon` | External exposure of a live URL: publicly reachable `.git` and other sensitive paths, secrets left in built frontend JS, security headers/CORS/unsafe HTTP methods, a bounded same-origin crawl for input-handling weaknesses, unintentionally exposed services (passive lookup, plus an optional active port check on a curated list), email-domain protection (SPF/DMARC), domain WHOIS expiry and reputation | stdlib; nmap optional for the active port check | a running URL |
 | `platform` | The real state of the production deployment: what is public, runtime variables, database access, CI/CD, config drift between repository and platform | `scan.py` handles Railway automatically; other platforms manually via `references/platform.md` | platform access |
 
 The first four read **code on disk**. `dast` and `recon` hit the **running
 service** — a fundamentally different question: SAST says "the code looks
 vulnerable", DAST and recon say "this is actually visible from outside on this
-instance". A complete picture needs both. `recon` is a pentester's external view
-of a live service (what is exposed, what leaked into the built frontend, how mail
-could be spoofed) that static analysis cannot give; it is pure stdlib and
-therefore always available. Recon's active probes obey the same authorisation
+instance". A complete picture needs both. `recon` is an outside-in view
+of a live service (what is exposed, what leaked into the built frontend, whether
+the email domain is protected) that static analysis cannot give; it is pure stdlib
+and therefore always available. Recon's active checks obey the same authorisation
 gate as `dast` (Step 4).
 
 `platform` is the seventh layer and is **partly automated**. For Railway,
